@@ -409,8 +409,12 @@ fn main() {
 
     // E: 导出真正的黑洞 PNG（warp=1 透镜开启, probe=0）
     let pretty = run(&blackhole_pipeline, 1.0, 0.0);
-    match write_png("blackhole.png", &pretty) {
-        Ok(()) => check("E  黑洞 PNG 导出", true, "blackhole.png 已写出".to_string()),
+    match write_png("target/blackhole-poc.png", &pretty) {
+        Ok(()) => check(
+            "E  黑洞 PNG 导出",
+            true,
+            "target/blackhole-poc.png 已写出".to_string(),
+        ),
         Err(e) => check("E  黑洞 PNG 导出", false, format!("写 PNG 失败: {e}")),
     }
 

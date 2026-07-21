@@ -1748,7 +1748,7 @@ diff --git a/crates/warpui/src/platform/mac/rendering/metal/shaders/shaders.meta
 index 8b3eef7a..8083cb65 100644
 --- a/crates/warpui/src/platform/mac/rendering/metal/shaders/shaders.metal
 +++ b/crates/warpui/src/platform/mac/rendering/metal/shaders/shaders.metal
-@@ -400,3 +400,278 @@ fragment float4 glyph_fragment_shader(
+@@ -400,3 +400,339 @@ fragment float4 glyph_fragment_shader(
      color.a *= saturate(in.fade_alpha);
      return color;
  }
@@ -1795,14 +1795,14 @@ index 8b3eef7a..8083cb65 100644
 +    // makes the shadow and rings render as true circles on any window shape.
 +    float aspect = uniforms->viewport_size.x / max(uniforms->viewport_size.y, 1.0);
 +
-+    // The blackhole's center drifts around the screen on a slow Lissajous path:
-+    // two incommensurate frequencies plus a phase offset make it wander
-+    // up/down/left/right rather than tracing a circle or a straight line. The
-+    // amplitude is a fraction of the screen height, small enough to stay on
-+    // screen yet clearly mobile.
++    // The blackhole has mass: its center follows a restrained, minute-long
++    // drift instead of roaming like a screensaver. Two low-amplitude,
++    // incommensurate modes prevent an obvious loop while keeping the terminal
++    // content spatially stable. Internal plasma motion carries the energy;
++    // the celestial body itself moves only gradually.
 +    float2 center = float2(
-+        0.22 * sin(time * 0.60),
-+        0.22 * sin(time * 0.40 + 2.0));
++        0.065 * sin(time * 0.11) + 0.015 * sin(time * 0.031 + 1.3),
++        0.050 * sin(time * 0.083 + 2.0) + 0.012 * sin(time * 0.027 - 0.7));
 +
 +    // Position relative to the (moving) blackhole center, in square space.
 +    float2 p = float2((in.uv.x - 0.5) * aspect, in.uv.y - 0.5) - center;
@@ -1826,50 +1826,111 @@ index 8b3eef7a..8083cb65 100644
 +    // Einstein-ring glow: brighten the lensed background just inside the disk.
 +    bg *= 1.0 + 0.35 * smoothstep(r_ring * 1.3, r_ring * 0.9, r);
 +
++    // Give the accretion disk its own coordinate system. Rotating the plane a
++    // little keeps it from feeling mechanically horizontal; compressing its
++    // minor axis creates the foreshortening of a disk seen nearly edge-on.
++    // The shadow and photon ring remain circular in screen space.
++    const float disk_tilt = 0.16;
++    const float disk_foreshortening = 0.34;
++    float disk_cos = cos(disk_tilt);
++    float disk_sin = sin(disk_tilt);
++    float disk_major = p.x * disk_cos + p.y * disk_sin;
++    float disk_minor = -p.x * disk_sin + p.y * disk_cos;
++    float2 disk_p = float2(disk_major, disk_minor / disk_foreshortening);
++    float disk_r = length(disk_p);
++    float2 disk_dir = disk_p / max(disk_r, 0.0001);
++
 +    // Relativistic Doppler beaming: the side of the disk rotating toward the
 +    // viewer is noticeably brighter — the signature EHT crescent. It stays fixed
 +    // in screen space (it is set by the disk's orientation) while matter flows
 +    // through it, so it reads as a stable bright lobe with structure rotating
 +    // beneath it.
-+    float beam = mix(0.30, 1.25, 0.5 + 0.5 * (-dir.x));
++    float approach = smoothstep(0.08, 0.94, 0.5 + 0.5 * (-disk_dir.x));
++    float beam = mix(0.16, 1.65, pow(approach, 0.72));
 +
-+    // Polar angle, used for everything that rotates.
-+    float ang = atan2(dir.y, dir.x);
++    // Polar angle in the disk plane, used for everything that orbits.
++    float disk_ang = atan2(disk_dir.y, disk_dir.x);
 +
-+    // Orbital motion — quick enough to read as clearly alive at a glance, but
-+    // not frantic. (~4 s per turn.)
-+    float spin = time * 1.6;
++    // Differential rotation gives the disk fluid shear: hot inner material
++    // completes an orbit in ~3.6 s, while the cooler outer flow takes ~7.4 s.
++    float inner_orbit = 1.0 - smoothstep(r_shadow * 1.08, r_ring * 1.85, disk_r);
++    float spin_rate = mix(0.85, 1.75, inner_orbit);
++    float spin = time * spin_rate;
 +
 +    // Two spiral arms of infalling matter that rotate around the shadow.
-+    float arms = 0.55 + 0.45 * sin(ang * 2.0 - spin + r * 22.0);
++    float arms = 0.55 + 0.45 * sin(disk_ang * 2.0 - spin + disk_r * 22.0);
 +
 +    // Turbulent flicker: the accretion plasma is chaotic, so its brightness
 +    // shimmers. A few incommensurate frequencies keep it from reading as a
 +    // clean mechanical pulse; amplitude is deliberately modest.
 +    float flicker = 1.0
-+        + 0.14 * sin(ang * 3.0 + time * 5.0)
-+        + 0.10 * sin(ang * 7.0 - time * 3.3 + r * 40.0)
-+        + 0.08 * sin(time * 8.1 + r * 90.0);
++        + 0.14 * sin(disk_ang * 3.0 + time * 5.0)
++        + 0.10 * sin(disk_ang * 7.0 - time * 3.3 + disk_r * 40.0)
++        + 0.08 * sin(time * 8.1 + disk_r * 90.0);
 +
 +    // Accretion disk: thin, hot ring, white-hot core fading to amber, carved by
-+    // the arms and shimmering with turbulence.
-+    float disk = exp(-pow((r - r_ring) / 0.014, 2.0)) * arms;
-+    float3 disk_hot = float3(1.0, 0.95, 0.85);
++    // the arms and shimmering with turbulence. Its rear half is mostly hidden
++    // here; gravitational lensing redraws that light above the shadow below.
++    float front_visibility = mix(0.12, 1.0, smoothstep(-0.012, 0.018, disk_minor));
++    float disk = exp(-pow((disk_r - r_ring) / 0.014, 2.0))
++        * arms * front_visibility;
++    float3 disk_receding = float3(0.42, 0.055, 0.018);
 +    float3 disk_cool = float3(1.0, 0.55, 0.18);
-+    float3 disk_col = mix(disk_hot, disk_cool, smoothstep(r_ring - 0.02, r_ring + 0.03, r));
++    float3 disk_hot = float3(1.0, 0.76, 0.42);
++    float radial_heat = 1.0 - smoothstep(r_ring - 0.02, r_ring + 0.03, disk_r);
++    float3 disk_col = mix(disk_receding, disk_cool, approach);
++    disk_col = mix(
++        disk_col,
++        disk_hot,
++        radial_heat * pow(approach, 0.65));
 +    float3 col = bg + disk_col * disk * 3.0 * fill * beam * flicker;
 +
++    // Light from the hidden rear half bends over the event horizon. A circular
++    // arc is used instead of another flattened ellipse: close to the shadow,
++    // strong lensing makes the far side appear to climb around the hole.
++    float rear_arc_radius = r_shadow * 1.38;
++    float rear_arc = exp(-pow((r - rear_arc_radius) / 0.011, 2.0));
++    float rear_visibility = smoothstep(0.018, -0.012, disk_minor);
++    float rear_major_dir = disk_major / max(r, 0.0001);
++    float rear_approach = smoothstep(0.10, 0.92, 0.5 + 0.5 * (-rear_major_dir));
++    float rear_beam = mix(0.22, 1.35, pow(rear_approach, 0.76));
++    float rear_texture = 0.82
++        + 0.12 * sin(disk_ang * 5.0 - spin * 0.7)
++        + 0.06 * sin(time * 3.1 + r * 120.0);
++    float3 rear_col = mix(disk_receding, float3(1.0, 0.62, 0.22), pow(rear_approach, 0.62));
++    col += rear_col
++        * rear_arc * rear_visibility * rear_beam * rear_texture * 1.45 * fill;
++
 +    // A bright hotspot orbiting the ring (a clump of matter), so the spin is obvious.
-+    float d_ang = atan2(sin(ang - spin), cos(ang - spin));
-+    float beacon = exp(-pow(d_ang / 0.4, 2.0)) * exp(-pow((r - r_ring) / 0.018, 2.0));
-+    col += float3(1.0, 0.92, 0.75) * beacon * 3.5 * fill;
++    float d_ang = atan2(sin(disk_ang - spin), cos(disk_ang - spin));
++    float beacon = exp(-pow(d_ang / 0.4, 2.0))
++        * exp(-pow((disk_r - r_ring) / 0.018, 2.0)) * front_visibility;
++    col += mix(disk_receding, disk_hot, pow(approach, 0.5)) * beacon * 3.5 * fill;
 +
-+    // Inner photon ring: razor-thin, near-white, with a faint slow pulse.
-+    float photon = exp(-pow((r - r_shadow * 1.12) / 0.0045, 2.0));
-+    col += float3(1.0, 0.92, 0.8) * photon * 2.0 * fill * (1.0 + 0.12 * sin(time * 2.0));
++    // The photon ring is not a uniform neon outline: it becomes white-hot only
++    // on the approaching side and nearly disappears into red on the far side.
++    float photon = exp(-pow((r - r_shadow * 1.12) / 0.0025, 2.0));
++    float photon_major_dir = (dir.x * disk_cos + dir.y * disk_sin);
++    float photon_lobe = smoothstep(-0.62, 0.82, -photon_major_dir);
++    float photon_intensity = mix(0.08, 1.15, pow(photon_lobe, 1.4));
++    float photon_flicker = 0.96 + 0.04 * sin(time * 2.0 + disk_ang * 3.0);
++    col += mix(disk_receding, float3(1.0, 0.93, 0.78), pow(photon_lobe, 0.55))
++        * photon * photon_intensity * photon_flicker * 2.0 * fill;
 +
-+    // Event horizon: pure black shadow with a crisp edge.
-+    float horizon = smoothstep(r_shadow, r_shadow * 0.96, r);
++    // Event horizon: almost circular, but not a mathematically perfect cutout.
++    // Several very slow, low-amplitude modes create a subtly organic silhouette
++    // while the soft absorption boundary keeps it from looking pasted on.
++    float shadow_ang = atan2(dir.y, dir.x);
++    float horizon_variation = r_shadow * 0.015 * (
++        0.55 * sin(shadow_ang * 3.0 + time * 0.11)
++        + 0.30 * sin(shadow_ang * 7.0 - time * 0.07)
++        + 0.15 * sin(shadow_ang * 13.0 + time * 0.04));
++    float horizon_edge = r_shadow + horizon_variation;
++    float horizon_softness = 0.0012 + 0.0008 * fill;
++    float horizon = 1.0 - smoothstep(
++        horizon_edge - horizon_softness,
++        horizon_edge + horizon_softness,
++        r);
 +    col = mix(col, float3(0.0), horizon);
 +
 +    // Fade the whole effect in/out based on fill.
@@ -2051,15 +2112,7 @@ diff --git a/crates/warpui/src/platform/mac/window.rs b/crates/warpui/src/platfo
 index ec68a489..e9a0c433 100644
 --- a/crates/warpui/src/platform/mac/window.rs
 +++ b/crates/warpui/src/platform/mac/window.rs
-@@ -1398,6 +1398,7 @@ extern "C-unwind" fn warp_view_set_frame_size(this: &Object, size: NSSize, async
- 
- #[no_mangle]
- extern "C-unwind" fn warp_update_layer(this: &Object) {
-+    use warpui_core::platform::WindowContext;
-     if !app::callback_dispatcher().can_borrow_mut() {
-         #[cfg(debug_assertions)]
-         log::warn!(
-@@ -1452,6 +1453,21 @@ extern "C-unwind" fn warp_update_layer(this: &Object) {
+@@ -1452,6 +1452,21 @@ extern "C-unwind" fn warp_update_layer(this: &Object) {
              renderer.render(&scene, window.as_ref(), ctx.font_cache());
          });
  
@@ -2070,12 +2123,12 @@ index ec68a489..e9a0c433 100644
 +        // advanced time and the disk swirls. This stops on its own once the fill
 +        // level returns to 0.
 +        //
-+        // TODO: request_redraw() also drops the cached scene, forcing a rebuild
-+        // each frame. For the empty login scene that is free; if it ever matters
-+        // on a full terminal, add a scene-preserving "poke" that only calls
-+        // setNeedsDisplayAsync.
++        // Preserve `next_scene` between animation frames. `request_redraw()` is
++        // for invalidated UI and deliberately clears that cache; the celestial
++        // effect only needs another Metal presentation of the same scene.
++        // SAFETY: messaging the valid window owned by this WindowState.
 +        if renderer.blackhole_active() {
-+            Window(window.clone()).request_redraw();
++            let _: () = msg_send![window.window(), setNeedsDisplayAsync];
 +        }
 +
          app::callback_dispatcher()
