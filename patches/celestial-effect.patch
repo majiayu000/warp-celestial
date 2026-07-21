@@ -1,0 +1,2083 @@
+diff --git a/INTEGRATION_SPEC.md b/INTEGRATION_SPEC.md
+new file mode 100644
+index 00000000..a81175fc
+--- /dev/null
++++ b/INTEGRATION_SPEC.md
+@@ -0,0 +1,68 @@
++# Warp 黑洞集成 Spec
++
++## 目标
++在 Warp（macOS Metal 后端）实现类似 ghostty-blackhole 的效果：终端内容被黑洞引力透镜扭曲，黑洞大小/活跃程度反映 Claude Code context window 填充率。
++
++## 范围
++- **仅 Metal 后端**：macOS 默认构建路径。wgpu 实验后端暂不改造。
++- **数据通道第一版采用文件**：`~/.cache/warp/blackhole_context`，避免在渲染线程外寻找 cursor color / agent 内部数据。后续可替换为 cursor-color 或 agent 直接 plumbing。
++- **不新增 Cargo 依赖**：纯 MSL + Rust 实现。
++
++## 修改文件
++
++| # | 文件 | 改动 |
++|---|---|---|
++| 1 | `crates/warpui/src/platform/mac/rendering/metal/shaders/shader_types.h` | 新增 `BlackholeUniforms`（viewport_size/fill/time/padding） |
++| 2 | `crates/warpui/src/platform/mac/rendering/metal/shaders/shaders.metal` | 新增 fullscreen vertex + `blackhole_fragment`：事件视界阴影、光子环、吸积盘、引力透镜 |
++| 3 | `crates/warpui/src/platform/mac/rendering/metal/renderer.rs` | 场景 pass 改写到离屏纹理；新增合成 pass 采样离屏纹理跑黑洞 shader；从文件读 `fill` 并传 uniform |
++| 4 | `crates/warpui/src/platform/mac/rendering/metal/frame_capture.rs` | 现有 `create_capture_texture()` 可直接复用为离屏纹理 |
++
++## 关键格式约定（已验证）
++
++来自 PoC 实测：
++- 离屏纹理：`MTLPixelFormat::BGRA8Unorm`，usage `RenderTarget | ShaderRead`，storage `Shared`（Apple Silicon）或 `Private`+blit
++- 场景 pipeline 保持 alpha blend，合成 pipeline **blend 必须关闭**
++- UV 约定：**y-down**，`uv=(p.x, 1.0 - p.y)`，其中 p 来自全屏三角形 `p=(0,0)/(2,0)/(0,2)`
++- 合成 pass 必须 `StoreAction::Store`，否则采样不到
++
++## 数据文件格式
++
++路径：`~/.cache/warp/blackhole_context`
++内容：单行浮点 `0.0` ~ `1.0`（context 填充率）。文件不存在或解析失败 = `0.0`（黑洞隐藏）。
++
++用户侧的 `claude-token.py`（独立脚本，AGPL 外）把 Claude Code 的填充率写进该文件，替代原版的光标颜色 hack。
++
++## 渲染流程
++
++```
++每帧 render():
++  1. 读 ~/.cache/warp/blackhole_context → fill (缓存/节流，避免每帧 open)
++  2. 场景 pass：把 Scene(rects/glyphs/images) 渲染到 offscreen_tex（原 drawable 改为 offscreen）
++  3. 合成 pass：全屏 quad 采样 offscreen_tex → blackhole_fragment → 输出到 drawable
++  4. present drawable
++```
++
++## 风险与回退
++
++- **性能**：两-pass + 文件读。文件读可用 `mio`/`notify` 或 100ms TTL 缓存；第一版先做简单缓存。
++- **格式错配**：已用 PoC 验证 BGRA8 / blend-off / flip-Y。
++- **无数据时**：fill=0，shader 中黑洞可完全淡出（仅保留微弱阴影或不可见），不影响正常使用。
++- **AGPL**：Warp 本体改动需 AGPL；helper 脚本独立。
++
++## 验证计划
++
++1. `cargo check -p warpui` 通过
++2. `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer cargo build -p warpui` 通过（调用 `xcrun metal`）
++3. 运行 Warp，写入 `0.5` 到数据文件，确认窗口出现黑洞且终端文字被透镜
++4. 写入 `0.0`，确认黑洞淡出/消失
++5. 删除文件，确认无异常
++
++## 后续可选增强
++
++- 把数据通道从文件换成 cursor-color 或 Warp agent 内部数据
++- 移植 ghostty 原版 GLSL 的完整 Schwarzschild 光线追踪
++- 支持 wgpu 后端
++
++## 当前阻塞
++
++无。Xcode + MetalToolchain 已就绪；repo 已 clone。
+diff --git a/crates/warpui/build.rs b/crates/warpui/build.rs
+index f9b6a3ed..9622480a 100644
+--- a/crates/warpui/build.rs
++++ b/crates/warpui/build.rs
+@@ -37,6 +37,7 @@ fn bindgen_shader_types() {
+         .allowlist_type("Uniforms")
+         .allowlist_type("PerRectUniforms")
+         .allowlist_type("PerGlyphUniforms")
++        .allowlist_type("EffectUniforms")
+         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+         // Disable intrinsic headers that define types containing 16-bit floats (`_Float16`,
+         // `__m512h`, etc.) via preprocessor directive. `bindgen` doesn't know how to process
+diff --git a/crates/warpui/src/platform/mac/rendering/metal/renderer.rs b/crates/warpui/src/platform/mac/rendering/metal/renderer.rs
+index f10adef6..03add99c 100644
+--- a/crates/warpui/src/platform/mac/rendering/metal/renderer.rs
++++ b/crates/warpui/src/platform/mac/rendering/metal/renderer.rs
+@@ -1,10 +1,11 @@
+-use std::collections::HashMap;
+ use std::ffi::c_void;
+-use std::fs::File;
++use std::fs::{self, File};
+ use std::io::Write;
+ use std::mem;
++use std::path::PathBuf;
+ use std::ptr::NonNull;
+ use std::sync::Once;
++use std::time::{Duration, Instant};
+ 
+ use dispatch2::DispatchData;
+ use objc2::rc::Retained;
+@@ -12,139 +13,44 @@ use objc2::runtime::ProtocolObject;
+ use objc2_foundation::NSString;
+ use objc2_metal::{
+     MTLBlendFactor, MTLBlendOperation, MTLBuffer, MTLClearColor, MTLCommandBuffer,
+-    MTLCommandEncoder, MTLCommandQueue, MTLDevice, MTLDrawable, MTLFunction, MTLIndexType,
+-    MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion,
+-    MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineDescriptor,
+-    MTLRenderPipelineState, MTLResourceOptions, MTLScissorRect, MTLSize, MTLStoreAction,
+-    MTLTexture, MTLTextureDescriptor, MTLViewport,
++    MTLCommandEncoder, MTLCommandQueue, MTLDevice, MTLDrawable, MTLFunction, MTLLibrary,
++    MTLLoadAction, MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder,
++    MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
++    MTLResourceOptions, MTLStoreAction, MTLTexture, MTLViewport,
+ };
+ use objc2_quartz_core::CAMetalDrawable;
+-use pathfinder_color::{ColorF, ColorU};
+-use pathfinder_geometry::rect::{RectF, RectI};
+-use pathfinder_geometry::vector::{vec2f, Vector2F};
++use pathfinder_geometry::rect::RectI;
++use pathfinder_geometry::vector::Vector2F;
+ use warp_errors::report_error;
+ use warpui_core::fonts::{self, canvas, RasterizedGlyph, SubpixelAlignment};
+ use warpui_core::platform::CapturedFrame;
+ use warpui_core::rendering::texture_cache::TextureCache;
+ use warpui_core::rendering::{self};
+-use warpui_core::scene::{CornerRadius, GlyphFade, GlyphKey, Icon, Image, Layer, Scene};
++use warpui_core::scene::{GlyphKey, Scene};
+ 
+-use super::frame_capture::capture_frame;
++use super::frame_capture::{capture_frame, create_capture_texture};
+ use crate::platform::mac::rendering::renderer::Device;
+ use crate::platform::mac::window::WindowState;
+-use crate::rendering::atlas::{AllocatedRegion, TextureId};
+-use crate::rendering::{get_best_dash_gap, GlyphCache, GlyphRasterBoundsFn, RasterizeGlyphFn};
++use crate::rendering::{GlyphCache, GlyphRasterBoundsFn, RasterizeGlyphFn};
++
++mod frame;
+ 
+ const METAL_LIB_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/shaders.metallib"));
+ static WRITE_LIB_TO_FILE: Once = Once::new();
+-
+-/// A structure to help manage a single rendering pass.
+-struct RenderPass<'a> {
+-    drawable: &'a ProtocolObject<dyn CAMetalDrawable>,
+-    buffer: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+-    encoder: Retained<ProtocolObject<dyn MTLRenderCommandEncoder>>,
+-    encoding_finished: bool,
+-}
+-
+-impl<'a> RenderPass<'a> {
+-    fn new(
+-        command_queue: &ProtocolObject<dyn MTLCommandQueue>,
+-        drawable: &'a ProtocolObject<dyn CAMetalDrawable>,
+-    ) -> Self {
+-        let buffer = command_queue
+-            .commandBuffer()
+-            .expect("command queue should always vend a command buffer");
+-        let encoder = buffer
+-            .renderCommandEncoderWithDescriptor(&Self::create_descriptor(drawable))
+-            .expect("command buffer should always vend a render command encoder");
+-        Self {
+-            drawable,
+-            buffer,
+-            encoder,
+-            encoding_finished: false,
+-        }
+-    }
+-
+-    /// Finishes a render pass with optional frame capture.
+-    ///
+-    /// If this is not called, the encoded commands will not be executed and the
+-    /// drawable will not be updated.
+-    ///
+-    /// Returns the captured frame data if capture was requested.
+-    fn finish_with_capture(
+-        mut self,
+-        drawable_size: pathfinder_geometry::vector::Vector2F,
+-        should_capture: bool,
+-        presents_with_transaction: bool,
+-    ) -> Option<CapturedFrame> {
+-        self.encoder.endEncoding();
+-        self.encoding_finished = true;
+-
+-        // If we're able to do asynchronous presentation, do so - it allows us to avoid
+-        // blocking on the GPU for the duration of the frame.
+-        if !should_capture && !presents_with_transaction {
+-            self.buffer
+-                .presentDrawable(ProtocolObject::from_ref(self.drawable));
+-            self.buffer.commit();
+-            return None;
+-        }
+-
+-        // Otherwise, commit the buffer and wait for it to complete before continuing.
+-        self.buffer.commit();
+-        self.buffer.waitUntilCompleted();
+-
+-        let capture = if should_capture {
+-            let texture = self.drawable.texture();
+-            capture_frame(&texture, drawable_size)
+-        } else {
+-            None
+-        };
+-
+-        self.drawable.present();
+-        capture
+-    }
+-
+-    /// Creates a descriptor for a pass that renders into the provided drawable.
+-    fn create_descriptor(
+-        drawable: &ProtocolObject<dyn CAMetalDrawable>,
+-    ) -> Retained<MTLRenderPassDescriptor> {
+-        let descriptor = MTLRenderPassDescriptor::new();
+-
+-        // SAFETY: index 0 is always a valid color attachment slot for a CAMetalLayer's drawable.
+-        let color_attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
+-        color_attachment.setTexture(Some(&drawable.texture()));
+-        color_attachment.setLoadAction(MTLLoadAction::Clear);
+-        color_attachment.setStoreAction(MTLStoreAction::Store);
+-        color_attachment.setClearColor(MTLClearColor {
+-            red: 0.,
+-            green: 0.,
+-            blue: 0.,
+-            alpha: 0.,
+-        });
+-
+-        descriptor
+-    }
+-}
+-
+-impl Drop for RenderPass<'_> {
+-    fn drop(&mut self) {
+-        // Make sure that `end_encoding()` is called, even if a panic occurs
+-        // during rendering.
+-        if !self.encoding_finished {
+-            self.encoder.endEncoding();
+-        }
+-    }
+-}
++const CONTEXT_FILL_TTL: Duration = Duration::from_millis(100);
+ 
+ /// A set of resources necessary for rendering that retain state across frames.
+ struct Resources {
+     draw_rects_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+     draw_images_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+     draw_glyphs_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
++    effect_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+     quad_vertices: Retained<ProtocolObject<dyn MTLBuffer>>,
+     quad_indices: Retained<ProtocolObject<dyn MTLBuffer>>,
+     glyph_cache: GlyphCache<Retained<ProtocolObject<dyn MTLTexture>>>,
+     texture_cache: TextureCache<Retained<ProtocolObject<dyn MTLTexture>>>,
++    offscreen_texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
++    offscreen_texture_size: Vector2F,
+ }
+ 
+ /// A structure that manages rendering scenes using a particular hardware
+@@ -152,6 +58,10 @@ struct Resources {
+ pub struct Renderer {
+     resources: Resources,
+     command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
++    start_time: Instant,
++    last_fill_read: Instant,
++    cached_fill: f32,
++    context_file: PathBuf,
+ }
+ 
+ impl Renderer {
+@@ -222,6 +132,34 @@ impl Renderer {
+             .newRenderPipelineStateWithDescriptor_error(&glyph_pipeline)
+             .unwrap();
+ 
++        // Which celestial effect to composite is selected by WARP_CELESTIAL
++        // (default: blackhole). Both effects share the vertex stage and
++        // EffectUniforms; only the fragment function differs, so swapping the
++        // look is just picking a different entry point here.
++        let effect_fragment_name = match std::env::var("WARP_CELESTIAL")
++            .unwrap_or_else(|_| "blackhole".to_string())
++            .as_str()
++        {
++            "sun" => "sun_fragment",
++            // Default and any unknown value fall back to the blackhole.
++            _ => "blackhole_fragment",
++        };
++        let effect_vertex_shader = library
++            .newFunctionWithName(&NSString::from_str("effect_vertex"))
++            .unwrap();
++        let effect_fragment_shader = library
++            .newFunctionWithName(&NSString::from_str(effect_fragment_name))
++            .unwrap();
++        let effect_pipeline = Self::create_effect_pipeline(
++            "CelestialEffect",
++            color_pixel_format,
++            &effect_vertex_shader,
++            &effect_fragment_shader,
++        );
++        let effect_pipeline_state = device
++            .newRenderPipelineStateWithDescriptor_error(&effect_pipeline)
++            .unwrap();
++
+         let quad_vertices = new_metal_buffer(
+             device,
+             &[
+@@ -241,19 +179,31 @@ impl Renderer {
+ 
+         let glyph_cache = GlyphCache::new(glyph_config);
+ 
++        let context_file = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()))
++            .join(".cache")
++            .join("warp")
++            .join("blackhole_context");
++
+         Self {
+             resources: Resources {
+                 draw_rects_pipeline_state,
+                 draw_images_pipeline_state,
+                 draw_glyphs_pipeline_state,
++                effect_pipeline_state,
+                 quad_vertices,
+                 quad_indices,
+                 glyph_cache,
+                 texture_cache: TextureCache::new(),
++                offscreen_texture: None,
++                offscreen_texture_size: Vector2F::zero(),
+             },
+             command_queue: device
+                 .newCommandQueue()
+                 .expect("device should always vend a command queue"),
++            start_time: Instant::now(),
++            last_fill_read: Instant::now() - Duration::from_secs(3600),
++            cached_fill: 0.0,
++            context_file,
+         }
+     }
+ 
+@@ -282,6 +232,27 @@ impl Renderer {
+         pipeline
+     }
+ 
++    fn create_effect_pipeline(
++        label: &str,
++        color_pixel_format: MTLPixelFormat,
++        vertex_shader: &ProtocolObject<dyn MTLFunction>,
++        fragment_shader: &ProtocolObject<dyn MTLFunction>,
++    ) -> Retained<MTLRenderPipelineDescriptor> {
++        let pipeline = MTLRenderPipelineDescriptor::new();
++        pipeline.setLabel(Some(&NSString::from_str(label)));
++        pipeline.setVertexFunction(Some(vertex_shader));
++        pipeline.setFragmentFunction(Some(fragment_shader));
++
++        // SAFETY: index 0 is always a valid color attachment slot for a render pipeline.
++        let attachment = unsafe { pipeline.colorAttachments().objectAtIndexedSubscript(0) };
++        attachment.setPixelFormat(color_pixel_format);
++        // The celestial pass samples the offscreen scene texture and writes the
++        // final composited result directly; alpha blending must be disabled.
++        attachment.setBlendingEnabled(false);
++
++        pipeline
++    }
++
+     fn render(
+         &mut self,
+         scene: &Scene,
+@@ -293,551 +264,137 @@ impl Renderer {
+             .glyph_cache
+             .update_config(&scene.rendering_config().glyphs);
+ 
+-        let render_pass = RenderPass::new(&self.command_queue, ctx.drawable);
+-
+-        Frame::new(scene, &render_pass.encoder, &mut self.resources, ctx).draw();
++        let drawable_size = ctx.drawable_size;
++        self.ensure_offscreen_texture(ctx.device, drawable_size);
++        let fill = self.read_context_fill();
++        let time = self.start_time.elapsed().as_secs_f32();
+ 
+-        render_pass.finish_with_capture(
+-            ctx.drawable_size,
+-            should_capture,
+-            presents_with_transaction,
+-        )
+-    }
+-}
++        let command_buffer = self
++            .command_queue
++            .commandBuffer()
++            .expect("command queue should always vend a command buffer");
+ 
+-/// A struct that manages rendering a single frame: the encoding of a scene into
+-/// a set of GPU draw calls to rasterize the scene description into a bitmap
+-/// image.
+-pub struct Frame<'a> {
+-    scene: &'a Scene,
+-    command_encoder: &'a ProtocolObject<dyn MTLRenderCommandEncoder>,
+-    resources: &'a mut Resources,
+-    ctx: &'a MetalDrawContext<'a>,
+-}
++        // Scene pass: render the terminal UI into an offscreen texture.
++        let scene_pass_descriptor = MTLRenderPassDescriptor::new();
++        let scene_color_attachment =
++            // SAFETY: index 0 is always a valid color attachment slot.
++            unsafe { scene_pass_descriptor.colorAttachments().objectAtIndexedSubscript(0) };
++        scene_color_attachment.setTexture(self.resources.offscreen_texture.as_ref().map(|v| &**v));
++        scene_color_attachment.setLoadAction(MTLLoadAction::Clear);
++        scene_color_attachment.setStoreAction(MTLStoreAction::Store);
++        scene_color_attachment.setClearColor(MTLClearColor {
++            red: 0.,
++            green: 0.,
++            blue: 0.,
++            alpha: 0.,
++        });
+ 
+-impl<'a> Frame<'a> {
+-    fn new(
+-        scene: &'a Scene,
+-        command_encoder: &'a ProtocolObject<dyn MTLRenderCommandEncoder>,
+-        resources: &'a mut Resources,
+-        ctx: &'a MetalDrawContext<'a>,
+-    ) -> Self {
+-        Self {
+-            scene,
+-            resources,
+-            command_encoder,
+-            ctx,
+-        }
+-    }
++        let scene_encoder = command_buffer
++            .renderCommandEncoderWithDescriptor(&scene_pass_descriptor)
++            .expect("command buffer should always vend a render command encoder");
++        frame::Frame::new(scene, &scene_encoder, &mut self.resources, ctx).draw();
++        scene_encoder.endEncoding();
++
++        // Composite pass: run the blackhole post-process shader and output to the drawable.
++        let drawable_texture = ctx.drawable.texture();
++        let composite_pass_descriptor = MTLRenderPassDescriptor::new();
++        let composite_color_attachment =
++            // SAFETY: index 0 is always a valid color attachment slot.
++            unsafe { composite_pass_descriptor.colorAttachments().objectAtIndexedSubscript(0) };
++        composite_color_attachment.setTexture(Some(&drawable_texture));
++        composite_color_attachment.setLoadAction(MTLLoadAction::Clear);
++        composite_color_attachment.setStoreAction(MTLStoreAction::Store);
++        composite_color_attachment.setClearColor(MTLClearColor {
++            red: 0.,
++            green: 0.,
++            blue: 0.,
++            alpha: 0.,
++        });
+ 
+-    fn draw(&mut self) {
+-        self.command_encoder.setViewport(MTLViewport {
++        let composite_encoder = command_buffer
++            .renderCommandEncoderWithDescriptor(&composite_pass_descriptor)
++            .expect("command buffer should always vend a render command encoder");
++        composite_encoder.setRenderPipelineState(&self.resources.effect_pipeline_state);
++        composite_encoder.setViewport(MTLViewport {
+             originX: 0.0,
+             originY: 0.0,
+-            width: self.ctx.drawable_size.x() as f64,
+-            height: self.ctx.drawable_size.y() as f64,
++            width: drawable_size.x() as f64,
++            height: drawable_size.y() as f64,
+             znear: 0.0,
+             zfar: 1.0,
+         });
+ 
+-        for layer in self.scene.layers() {
+-            if let Some(bounds) = layer.clip_bounds {
+-                // Make sure the scissor rect doesn't extend beyond the boundaries
+-                // of the window, as required by the Metal API.
+-                // API docs: https://developer.apple.com/documentation/metal/mtlrendercommandencoder/1515583-setscissorrect?language=objc
+-                // Scissor test background reading: https://developer.mozilla.org/en-US/docs/Web/API/WebGL_API/By_example/Basic_scissoring
+-                let device_bounds = RectF::new(Vector2F::zero(), self.ctx.drawable_size);
+-                let bounds = (bounds * self.scene.scale_factor()).intersection(device_bounds);
+-                if let Some(intersection) = bounds {
+-                    self.command_encoder.setScissorRect(MTLScissorRect {
+-                        x: intersection.origin_x().round() as usize,
+-                        y: intersection.origin_y().round() as usize,
+-                        width: intersection.width().round() as usize,
+-                        height: intersection.height().round() as usize,
+-                    });
+-                } else {
+-                    // The layer's clip bounds don't intersect the window bounds
+-                    // at all; we can skip drawing anything in this layer.
+-                    continue;
+-                }
+-            } else {
+-                self.command_encoder.setScissorRect(MTLScissorRect {
+-                    x: 0_usize,
+-                    y: 0_usize,
+-                    width: self.ctx.drawable_size.x() as usize,
+-                    height: self.ctx.drawable_size.y() as usize,
+-                });
+-            }
+-            self.draw_rects(layer);
+-            self.draw_images(layer);
+-            self.draw_glyphs(layer);
+-        }
+-    }
+-
+-    // Utility function to render image or icon in Metal.
+-    fn render_image_or_icon(&mut self, image: Option<&Image>, icon: Option<&Icon>) {
+-        let opacity;
+-        let bounds;
+-        let asset;
+-        let is_icon;
+-        let icon_color;
+-        let ui_corner_radius;
+-
+-        if let Some(to_render) = image {
+-            opacity = to_render.opacity;
+-            bounds = to_render.bounds;
+-            asset = &to_render.asset;
+-            is_icon = false;
+-            icon_color = ColorF::new(0.0, 0.0, 0.0, opacity).into();
+-            ui_corner_radius = to_render.corner_radius;
+-        } else {
+-            let to_render = icon.unwrap();
+-            opacity = to_render.opacity;
+-            bounds = to_render.bounds;
+-            asset = &to_render.asset;
+-            is_icon = true;
+-            icon_color = to_render.color.to_f32().into();
+-            ui_corner_radius = CornerRadius::default();
+-        }
+-
+-        let mut per_rect_uniforms = Vec::new();
+-        let scale_factor = self.scene.scale_factor();
+-        let bounds = bounds * scale_factor;
+-        let min_dimension = f32::min(bounds.height(), bounds.width());
+-        let corner_radius = crate::rendering::CornerRadius::from_ui_corner_radius(
+-            ui_corner_radius,
+-            scale_factor,
+-            min_dimension,
+-        );
+-        per_rect_uniforms.push(shader::PerRectUniforms::new(
+-            bounds.origin().into(),
+-            bounds.size().into(),
+-            corner_radius,
+-            0.,
+-            0.,
+-            0.,
+-            0.,
+-            vec2f(0.0, 0.0).into(),
+-            vec2f(1.0, 0.0).into(),
+-            ColorF::new(0.0, 0.0, 0.0, opacity).into(),
+-            ColorF::new(0.0, 0.0, 0.0, opacity).into(),
+-            vec2f(0.0, 0.0).into(),
+-            vec2f(1.0, 0.0).into(),
+-            ColorU::transparent_black().to_f32().into(),
+-            ColorU::transparent_black().to_f32().into(),
+-            is_icon,
+-            icon_color,
+-            Vector2F::zero().into(),
+-            ColorU::transparent_black().to_f32().into(),
+-            0_f32,
+-            0_f32,
+-            0.,
+-            vec2f(0.0, 0.0).into(),
+-        ));
+-        let per_rect_uniforms_buffer = new_metal_buffer(
+-            self.ctx.device,
+-            &per_rect_uniforms,
+-            MTLResourceOptions::StorageModeManaged,
+-        );
+-
+-        let uniforms = shader::Uniforms::new(self.ctx.drawable_size.into());
++        let uniforms = shader::EffectUniforms::new(drawable_size.into(), fill, time);
+         let uniforms_ptr = NonNull::from(&uniforms).cast::<c_void>();
+-        let uniforms_len = mem::size_of::<shader::Uniforms>();
++        let uniforms_len = mem::size_of::<shader::EffectUniforms>();
+ 
+-        // SAFETY: the per-rect uniform buffer and `uniforms` value outlive this encoded draw
+-        // call, and the bound buffer/byte sizes and indices match the shader bindings.
++        // SAFETY: the offscreen texture, uniforms, and vertex draw call outlive the encoder.
+         unsafe {
+-            self.command_encoder.setVertexBuffer_offset_atIndex(
+-                Some(&per_rect_uniforms_buffer),
++            composite_encoder.setFragmentTexture_atIndex(
++                self.resources
++                    .offscreen_texture
++                    .as_ref()
++                    .map(|texture| &**texture),
+                 0,
+-                1,
+             );
+-            self.command_encoder
+-                .setVertexBytes_length_atIndex(uniforms_ptr, uniforms_len, 2);
+-            self.command_encoder
+-                .setFragmentBytes_length_atIndex(uniforms_ptr, uniforms_len, 0);
+-        }
+-
+-        let (_, texture) = self
+-            .resources
+-            .texture_cache
+-            .get_or_insert_by_asset(asset, |asset| {
+-                let width = asset.size().x() as usize;
+-                let height = asset.size().y() as usize;
+-
+-                let texture_descriptor = MTLTextureDescriptor::new();
+-                texture_descriptor.setPixelFormat(MTLPixelFormat::RGBA8Unorm);
+-                // SAFETY: width/height come from a decoded asset and are within Metal limits.
+-                unsafe {
+-                    texture_descriptor.setWidth(width);
+-                    texture_descriptor.setHeight(height);
+-                }
+-                let texture = self
+-                    .ctx
+-                    .device
+-                    .newTextureWithDescriptor(&texture_descriptor)
+-                    .expect("device should create an RGBA8 texture");
+-                let region = MTLRegion {
+-                    origin: MTLOrigin { x: 0, y: 0, z: 0 },
+-                    size: MTLSize {
+-                        width,
+-                        height,
+-                        depth: 1,
+-                    },
+-                };
+-
+-                let bytes_per_row: usize = 4 * width;
+-                // SAFETY: rgba_bytes holds width*height*4 bytes laid out to match the region
+-                // and row stride.
+-                unsafe {
+-                    texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+-                        region,
+-                        0,
+-                        NonNull::new(asset.rgba_bytes().as_ptr() as *mut c_void)
+-                            .expect("asset rgba bytes pointer is non-null"),
+-                        bytes_per_row,
+-                    );
+-                }
+-
+-                texture
+-            });
+-
+-        // SAFETY: the bound texture and quad index buffer outlive this encoded draw call.
+-        unsafe {
+-            self.command_encoder
+-                .setFragmentTexture_atIndex(Some(&**texture), 0);
+-
+-            self.command_encoder
+-                .drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount(
+-                    MTLPrimitiveType::Triangle,
+-                    6,
+-                    MTLIndexType::UInt16,
+-                    &self.resources.quad_indices,
+-                    0,
+-                    per_rect_uniforms.len(),
+-                );
+-        }
+-    }
+-
+-    fn draw_images(&mut self, layer: &Layer) {
+-        if layer.images.is_empty() && layer.icons.is_empty() {
+-            // It's a mac assertion error to create an empty metal buffer, so exit early
+-            return;
+-        }
+-
+-        self.command_encoder
+-            .setRenderPipelineState(&self.resources.draw_images_pipeline_state);
+-        // SAFETY: index 0 binds the shared quad vertex buffer, which outlives the draw calls.
+-        unsafe {
+-            self.command_encoder.setVertexBuffer_offset_atIndex(
+-                Some(&self.resources.quad_vertices),
+-                0,
+-                0,
+-            );
+-        }
+-
+-        for image in &layer.images {
+-            self.render_image_or_icon(Some(image), None);
+-        }
+-
+-        // Another iteration for rendering icons.
+-        for icon in &layer.icons {
+-            self.render_image_or_icon(None, Some(icon));
+-        }
+-    }
+-
+-    fn draw_rects(&self, layer: &Layer) {
+-        if layer.rects.is_empty() {
+-            // It's a mac assertion error to create an empty metal buffer, so exit early
+-            return;
+-        }
+-
+-        self.command_encoder
+-            .setRenderPipelineState(&self.resources.draw_rects_pipeline_state);
+-        // SAFETY: index 0 binds the shared quad vertex buffer, which outlives the draw call.
+-        unsafe {
+-            self.command_encoder.setVertexBuffer_offset_atIndex(
+-                Some(&self.resources.quad_vertices),
+-                0,
++            composite_encoder.setFragmentBytes_length_atIndex(uniforms_ptr, uniforms_len, 0);
++            composite_encoder.drawPrimitives_vertexStart_vertexCount(
++                MTLPrimitiveType::Triangle,
+                 0,
++                3,
+             );
+         }
++        composite_encoder.endEncoding();
+ 
+-        let mut per_rect_uniforms = Vec::new();
+-        for rect in &layer.rects {
+-            let scale_factor = self.scene.scale_factor();
+-            let bounds = rect.bounds * scale_factor;
+-
+-            let dash = rect
+-                .border
+-                .dash
+-                .map(|mut dash| {
+-                    dash.dash_length *= scale_factor;
+-                    dash.gap_length *= scale_factor;
+-                    dash
+-                })
+-                .unwrap_or_default();
+-            let horizontal_gap = get_best_dash_gap(bounds.width(), dash);
+-            let vertical_gap = get_best_dash_gap(bounds.height(), dash);
+-            let dash_length = dash.dash_length;
+-            let gap_lengths = Vector2F::new(horizontal_gap, vertical_gap);
+-
+-            if let Some(drop_shadow) = rect.drop_shadow {
+-                let sigma = drop_shadow.blur_radius;
+-                let padding = drop_shadow.spread_radius * self.scene.scale_factor();
+-                let shadow_origin =
+-                    bounds.origin() + drop_shadow.offset * self.scene.scale_factor() - padding;
+-                let shadow_size = bounds.size() + vec2f(2. * padding, 2. * padding);
+-
+-                let min_dimension = f32::min(shadow_size.x(), shadow_size.y());
+-
+-                let corner_radius = crate::rendering::CornerRadius::from_ui_corner_radius(
+-                    rect.corner_radius,
+-                    scale_factor,
+-                    min_dimension,
+-                );
+-
+-                // For the drop shadow case, we pass in a rect with the bounds
+-                // of the shadow and render that before rendering the actual rect.
+-                per_rect_uniforms.push(shader::PerRectUniforms::new(
+-                    shadow_origin.into(),
+-                    shadow_size.into(),
+-                    corner_radius,
+-                    0_f32,
+-                    0_f32,
+-                    0_f32,
+-                    0_f32,
+-                    Vector2F::zero().into(),
+-                    Vector2F::zero().into(),
+-                    ColorU::transparent_black().to_f32().into(),
+-                    ColorU::transparent_black().to_f32().into(),
+-                    Vector2F::zero().into(),
+-                    Vector2F::zero().into(),
+-                    ColorU::transparent_black().to_f32().into(),
+-                    ColorU::transparent_black().to_f32().into(),
+-                    false,
+-                    ColorU::transparent_black().to_f32().into(),
+-                    (drop_shadow.offset * self.scene.scale_factor()).into(),
+-                    drop_shadow.color.to_f32().into(),
+-                    sigma * self.scene.scale_factor(),
+-                    padding,
+-                    dash_length,
+-                    gap_lengths.into(),
+-                ));
+-            }
+-
+-            let min_dimension = f32::min(bounds.height(), bounds.width());
+-            let corner_radius = crate::rendering::CornerRadius::from_ui_corner_radius(
+-                rect.corner_radius,
+-                scale_factor,
+-                min_dimension,
+-            );
+-
+-            per_rect_uniforms.push(shader::PerRectUniforms::new(
+-                bounds.origin().into(),
+-                bounds.size().into(),
+-                corner_radius,
+-                rect.border.top_width() * scale_factor,
+-                rect.border.right_width() * scale_factor,
+-                rect.border.bottom_width() * scale_factor,
+-                rect.border.left_width() * scale_factor,
+-                rect.background.start().into(),
+-                rect.background.end().into(),
+-                rect.background.start_color().to_f32().into(),
+-                rect.background.end_color().to_f32().into(),
+-                rect.border.color.start().into(),
+-                rect.border.color.end().into(),
+-                rect.border.color.start_color().to_f32().into(),
+-                rect.border.color.end_color().to_f32().into(),
+-                false,
+-                ColorU::transparent_black().to_f32().into(),
+-                Vector2F::zero().into(),
+-                ColorU::transparent_black().to_f32().into(),
+-                0_f32,
+-                0_f32,
+-                dash_length,
+-                gap_lengths.into(),
+-            ));
++        if !should_capture && !presents_with_transaction {
++            command_buffer.presentDrawable(ProtocolObject::from_ref(ctx.drawable));
++            command_buffer.commit();
++            return None;
+         }
+-        let per_rect_uniforms_buffer = new_metal_buffer(
+-            self.ctx.device,
+-            &per_rect_uniforms,
+-            MTLResourceOptions::StorageModeManaged,
+-        );
+ 
+-        let uniforms = shader::Uniforms::new(self.ctx.drawable_size.into());
+-        let uniforms_ptr = NonNull::from(&uniforms).cast::<c_void>();
+-        let uniforms_len = mem::size_of::<shader::Uniforms>();
++        command_buffer.commit();
++        command_buffer.waitUntilCompleted();
+ 
+-        // SAFETY: the per-rect uniform buffer and `uniforms` value outlive this encoded draw
+-        // call, and the bound buffer/byte sizes and indices match the shader bindings.
+-        unsafe {
+-            self.command_encoder.setVertexBuffer_offset_atIndex(
+-                Some(&per_rect_uniforms_buffer),
+-                0,
+-                1,
+-            );
+-            self.command_encoder
+-                .setVertexBytes_length_atIndex(uniforms_ptr, uniforms_len, 2);
+-            self.command_encoder
+-                .setFragmentBytes_length_atIndex(uniforms_ptr, uniforms_len, 0);
++        let capture = if should_capture {
++            capture_frame(&drawable_texture, drawable_size)
++        } else {
++            None
++        };
+ 
+-            self.command_encoder
+-                .drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount(
+-                    MTLPrimitiveType::Triangle,
+-                    6,
+-                    MTLIndexType::UInt16,
+-                    &self.resources.quad_indices,
+-                    0,
+-                    per_rect_uniforms.len(),
+-                );
+-        }
++        ctx.drawable.present();
++        capture
+     }
+ 
+-    fn draw_glyphs(&mut self, layer: &Layer) {
+-        if layer.glyphs.is_empty() {
+-            // It's a mac assertion error to create an empty metal buffer, so exit early
+-            return;
+-        }
+-
+-        self.command_encoder
+-            .setRenderPipelineState(&self.resources.draw_glyphs_pipeline_state);
+-        // SAFETY: index 0 binds the shared quad vertex buffer, which outlives the draw calls.
+-        unsafe {
+-            self.command_encoder.setVertexBuffer_offset_atIndex(
+-                Some(&self.resources.quad_vertices),
+-                0,
+-                0,
+-            );
+-        }
+-
+-        let scale_factor = self.scene.scale_factor();
+-
+-        let mut texture_to_glyph: HashMap<TextureId, Vec<shader::PerGlyphUniforms>> =
+-            HashMap::new();
+-        for glyph in &layer.glyphs {
+-            let glyph_position = glyph.position * scale_factor;
+-            let subpixel_alignment = SubpixelAlignment::new(glyph_position);
+-
+-            match self.resources.glyph_cache.get(
+-                glyph.glyph_key,
+-                self.scene.scale_factor(),
+-                subpixel_alignment,
+-                &|atlas_size| create_new_texture_atlas(atlas_size, self.ctx.device),
+-                &insert_glyph_into_texture,
+-                &|glyph_key, scale, alignment| {
+-                    self.ctx.glyph_raster_bounds(glyph_key, scale, alignment)
+-                },
+-                &|glyph_key, scale, subpixel_alignment, glyph_config, format| {
+-                    self.ctx.rasterize_glyph(
+-                        glyph_key,
+-                        scale,
+-                        subpixel_alignment,
+-                        glyph_config,
+-                        format,
+-                    )
+-                },
+-            ) {
+-                Ok(Some(gto)) => {
+-                    let (fade_start, fade_end) = match &glyph.fade {
+-                        None => (&0.0, &-1.0),
+-                        Some(GlyphFade::Horizontal { start, end }) => (start, end),
+-                    };
+-
+-                    // Adjust the horizontal position by the subpixel alignment
+-                    // so that we only shift the glyph over by the amount that
+-                    // isn't accounted for in the subpixel-rasterized glyph.
+-                    let glyph_position = glyph_position - subpixel_alignment.to_offset();
+-
+-                    // Make sure to pass the glyph size in the atlas
+-                    // Not the size of the render bounds (which may be smaller)
+-                    // If you pass the render bounds as the size, the shader
+-                    // will try to sample from a smaller area than the size
+-                    // in the atlas, leading to artifacts.
+-                    let uv_region = gto.allocated_region.uv_region;
+-                    let uniform = shader::PerGlyphUniforms::new(
+-                        (glyph_position + gto.raster_bounds.origin()).into(),
+-                        gto.allocated_region.pixel_region.size().to_f32().into(),
+-                        uv_region.origin_x(),
+-                        uv_region.origin_y(),
+-                        uv_region.width(),
+-                        uv_region.height(),
+-                        fade_start * scale_factor,
+-                        fade_end * scale_factor,
+-                        glyph.color.to_f32().into(),
+-                        gto.is_emoji,
+-                    );
+-
+-                    if let Some(per_glyph_uniforms) = texture_to_glyph.get_mut(&gto.texture_id) {
+-                        per_glyph_uniforms.push(uniform);
+-                    } else {
+-                        texture_to_glyph.insert(gto.texture_id, vec![uniform]);
+-                    }
+-                }
+-                Ok(None) => {}
+-                Err(_) => {
+-                    report_error!(
+-                        "Unable to get glyph out of glyph cache",
+-                        extra: { "glyph" => ?glyph }
+-                    );
+-                    return;
+-                }
+-            }
+-        }
+-
+-        if texture_to_glyph.is_empty() {
+-            // Early exit if there are no glyphs to render, as it causes a debug assert
+-            // failure in the metal code to create an empty metal buffer.
++    fn ensure_offscreen_texture(&mut self, device: &ProtocolObject<dyn MTLDevice>, size: Vector2F) {
++        if self.resources.offscreen_texture_size == size
++            && self.resources.offscreen_texture.is_some()
++        {
+             return;
+         }
+ 
+-        for (texture_id, per_glyph_uniforms) in texture_to_glyph {
+-            let per_glyph_uniforms_buffer = new_metal_buffer(
+-                self.ctx.device,
+-                &per_glyph_uniforms,
+-                MTLResourceOptions::StorageModeManaged,
+-            );
+-
+-            let uniforms = shader::Uniforms::new(self.ctx.drawable_size.into());
+-            let uniforms_ptr = NonNull::from(&uniforms).cast::<c_void>();
+-            let uniforms_len = mem::size_of::<shader::Uniforms>();
+-
+-            let texture = self
+-                .resources
+-                .glyph_cache
+-                .texture(&texture_id)
+-                .expect("texture ID should be in atlas");
++        let width = size.x().round().max(1.0) as usize;
++        let height = size.y().round().max(1.0) as usize;
++        self.resources.offscreen_texture = Some(create_capture_texture(
++            device,
++            width,
++            height,
++            MTLPixelFormat::BGRA8Unorm,
++        ));
++        self.resources.offscreen_texture_size = size;
++    }
+ 
+-            // SAFETY: the per-glyph uniform buffer, `uniforms` value, bound texture, and quad
+-            // index buffer outlive this encoded draw call, and the bound sizes/indices match the
+-            // shader bindings.
+-            unsafe {
+-                self.command_encoder.setVertexBuffer_offset_atIndex(
+-                    Some(&per_glyph_uniforms_buffer),
+-                    0,
+-                    1,
+-                );
+-                self.command_encoder
+-                    .setVertexBytes_length_atIndex(uniforms_ptr, uniforms_len, 2);
+-                self.command_encoder
+-                    .setFragmentTexture_atIndex(Some(&**texture), 0);
+-                self.command_encoder
+-                    .drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount(
+-                        MTLPrimitiveType::Triangle,
+-                        6,
+-                        MTLIndexType::UInt16,
+-                        &self.resources.quad_indices,
+-                        0,
+-                        per_glyph_uniforms.len(),
+-                    );
+-            }
++    fn read_context_fill(&mut self) -> f32 {
++        if self.last_fill_read.elapsed() < CONTEXT_FILL_TTL {
++            return self.cached_fill;
+         }
+-    }
+-}
+ 
+-impl Drop for Frame<'_> {
+-    fn drop(&mut self) {
+-        self.resources.texture_cache.end_frame();
++        self.cached_fill = fs::read_to_string(&self.context_file)
++            .ok()
++            .and_then(|contents| contents.trim().parse::<f32>().ok())
++            .map(|fill| fill.clamp(0.0, 1.0))
++            .unwrap_or(0.0);
++        self.last_fill_read = Instant::now();
++        self.cached_fill
+     }
+ }
+ 
+@@ -1021,6 +578,16 @@ mod shader {
+             }
+         }
+     }
++
++    impl EffectUniforms {
++        pub fn new(viewport_size: Vector2F, fill: f32, time: f32) -> Self {
++            Self {
++                viewport_size: viewport_size.0,
++                fill,
++                time,
++            }
++        }
++    }
+ }
+ 
+ pub(super) struct MetalDrawContext<'a> {
+@@ -1100,57 +667,12 @@ impl super::super::Renderer for Renderer {
+     }
+ 
+     fn resize(&mut self, _window: &WindowState) {
+-        // TODO(alokedesai): Backport the optimization to only set the size of surface when a
+-        // window is resized to the Metal renderer.
+-    }
+-}
+-
+-/// Writes the bytes of the `glyph` into a region of the current texture identified by `region`.
+-fn insert_glyph_into_texture(
+-    region: AllocatedRegion,
+-    glyph: &RasterizedGlyph,
+-    texture: &mut Retained<ProtocolObject<dyn MTLTexture>>,
+-) {
+-    let region = MTLRegion {
+-        origin: MTLOrigin {
+-            x: region.pixel_region.origin_x() as usize,
+-            y: region.pixel_region.origin_y() as usize,
+-            z: 0,
+-        },
+-        size: MTLSize {
+-            width: region.pixel_region.width() as usize,
+-            height: region.pixel_region.height() as usize,
+-            depth: 1,
+-        },
+-    };
+-
+-    let bytes_per_row: usize = 4 * (glyph.canvas.size.x() as usize);
+-    // SAFETY: the glyph canvas holds at least `bytes_per_row * region.height` bytes laid out to
+-    // match the destination region.
+-    unsafe {
+-        texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+-            region,
+-            0,
+-            NonNull::new(glyph.canvas.pixels.as_slice().as_ptr() as *mut c_void)
+-                .expect("glyph canvas pixel pointer is non-null"),
+-            bytes_per_row,
+-        );
++        // Drop the offscreen texture so it is recreated at the new drawable size next frame.
++        self.resources.offscreen_texture = None;
++        self.resources.offscreen_texture_size = Vector2F::zero();
+     }
+-}
+ 
+-/// Creates a new texture atlas for use in the cache.
+-fn create_new_texture_atlas(
+-    atlas_size: usize,
+-    device: &ProtocolObject<dyn MTLDevice>,
+-) -> Retained<ProtocolObject<dyn MTLTexture>> {
+-    let texture_descriptor = MTLTextureDescriptor::new();
+-    texture_descriptor.setPixelFormat(MTLPixelFormat::RGBA8Unorm);
+-    // SAFETY: `atlas_size` is a fixed, valid texture dimension within Metal limits.
+-    unsafe {
+-        texture_descriptor.setWidth(atlas_size);
+-        texture_descriptor.setHeight(atlas_size);
++    fn blackhole_active(&self) -> bool {
++        self.cached_fill > 0.0
+     }
+-    device
+-        .newTextureWithDescriptor(&texture_descriptor)
+-        .expect("device should create an atlas texture")
+ }
+diff --git a/crates/warpui/src/platform/mac/rendering/metal/renderer/frame.rs b/crates/warpui/src/platform/mac/rendering/metal/renderer/frame.rs
+new file mode 100644
+index 00000000..42312fb3
+--- /dev/null
++++ b/crates/warpui/src/platform/mac/rendering/metal/renderer/frame.rs
+@@ -0,0 +1,624 @@
++use std::collections::HashMap;
++use std::ffi::c_void;
++use std::ptr::NonNull;
++
++use objc2::rc::Retained;
++use objc2::runtime::ProtocolObject;
++use objc2_metal::{
++    MTLBuffer, MTLDevice, MTLIndexType, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion,
++    MTLRenderCommandEncoder, MTLResourceOptions, MTLSize, MTLTexture, MTLTextureDescriptor,
++};
++use pathfinder_color::{ColorF, ColorU};
++use pathfinder_geometry::rect::RectF;
++use pathfinder_geometry::vector::{vec2f, Vector2F};
++use warpui_core::fonts::{RasterizedGlyph, SubpixelAlignment};
++use warpui_core::scene::{CornerRadius, GlyphFade, Icon, Image, Layer, Scene};
++
++use super::{shader, MetalDrawContext, Resources};
++use crate::rendering::atlas::{AllocatedRegion, TextureId};
++use crate::rendering::get_best_dash_gap;
++
++/// A struct that manages rendering a single frame: the encoding of a scene into
++/// a set of GPU draw calls to rasterize the scene description into a bitmap
++/// image.
++pub struct Frame<'a> {
++    scene: &'a Scene,
++    command_encoder: &'a ProtocolObject<dyn MTLRenderCommandEncoder>,
++    resources: &'a mut Resources,
++    ctx: &'a MetalDrawContext<'a>,
++}
++
++impl<'a> Frame<'a> {
++    pub fn new(
++        scene: &'a Scene,
++        command_encoder: &'a ProtocolObject<dyn MTLRenderCommandEncoder>,
++        resources: &'a mut Resources,
++        ctx: &'a MetalDrawContext<'a>,
++    ) -> Self {
++        Self {
++            scene,
++            resources,
++            command_encoder,
++            ctx,
++        }
++    }
++
++    pub fn draw(&mut self) {
++        self.command_encoder.setViewport(objc2_metal::MTLViewport {
++            originX: 0.0,
++            originY: 0.0,
++            width: self.ctx.drawable_size.x() as f64,
++            height: self.ctx.drawable_size.y() as f64,
++            znear: 0.0,
++            zfar: 1.0,
++        });
++
++        for layer in self.scene.layers() {
++            if let Some(bounds) = layer.clip_bounds {
++                // Make sure the scissor rect doesn't extend beyond the boundaries
++                // of the window, as required by the Metal API.
++                // API docs: https://developer.apple.com/documentation/metal/mtlrendercommandencoder/1515583-setscissorrect?language=objc
++                // Scissor test background reading: https://developer.mozilla.org/en-US/docs/Web/API/WebGL_API/By_example/Basic_scissoring
++                let device_bounds = RectF::new(Vector2F::zero(), self.ctx.drawable_size);
++                let bounds = (bounds * self.scene.scale_factor()).intersection(device_bounds);
++                if let Some(intersection) = bounds {
++                    self.command_encoder
++                        .setScissorRect(objc2_metal::MTLScissorRect {
++                            x: intersection.origin_x().round() as usize,
++                            y: intersection.origin_y().round() as usize,
++                            width: intersection.width().round() as usize,
++                            height: intersection.height().round() as usize,
++                        });
++                } else {
++                    // The layer's clip bounds don't intersect the window bounds
++                    // at all; we can skip drawing anything in this layer.
++                    continue;
++                }
++            } else {
++                self.command_encoder
++                    .setScissorRect(objc2_metal::MTLScissorRect {
++                        x: 0_usize,
++                        y: 0_usize,
++                        width: self.ctx.drawable_size.x() as usize,
++                        height: self.ctx.drawable_size.y() as usize,
++                    });
++            }
++            self.draw_rects(layer);
++            self.draw_images(layer);
++            self.draw_glyphs(layer);
++        }
++    }
++
++    // Utility function to render image or icon in Metal.
++    fn render_image_or_icon(&mut self, image: Option<&Image>, icon: Option<&Icon>) {
++        let opacity;
++        let bounds;
++        let asset;
++        let is_icon;
++        let icon_color;
++        let ui_corner_radius;
++
++        if let Some(to_render) = image {
++            opacity = to_render.opacity;
++            bounds = to_render.bounds;
++            asset = &to_render.asset;
++            is_icon = false;
++            icon_color = ColorF::new(0.0, 0.0, 0.0, opacity).into();
++            ui_corner_radius = to_render.corner_radius;
++        } else {
++            let to_render = icon.unwrap();
++            opacity = to_render.opacity;
++            bounds = to_render.bounds;
++            asset = &to_render.asset;
++            is_icon = true;
++            icon_color = to_render.color.to_f32().into();
++            ui_corner_radius = CornerRadius::default();
++        }
++
++        let mut per_rect_uniforms = Vec::new();
++        let scale_factor = self.scene.scale_factor();
++        let bounds = bounds * scale_factor;
++        let min_dimension = f32::min(bounds.height(), bounds.width());
++        let corner_radius = crate::rendering::CornerRadius::from_ui_corner_radius(
++            ui_corner_radius,
++            scale_factor,
++            min_dimension,
++        );
++        per_rect_uniforms.push(shader::PerRectUniforms::new(
++            bounds.origin().into(),
++            bounds.size().into(),
++            corner_radius,
++            0.,
++            0.,
++            0.,
++            0.,
++            vec2f(0.0, 0.0).into(),
++            vec2f(1.0, 0.0).into(),
++            ColorF::new(0.0, 0.0, 0.0, opacity).into(),
++            ColorF::new(0.0, 0.0, 0.0, opacity).into(),
++            vec2f(0.0, 0.0).into(),
++            vec2f(1.0, 0.0).into(),
++            ColorU::transparent_black().to_f32().into(),
++            ColorU::transparent_black().to_f32().into(),
++            is_icon,
++            icon_color,
++            Vector2F::zero().into(),
++            ColorU::transparent_black().to_f32().into(),
++            0_f32,
++            0_f32,
++            0.,
++            vec2f(0.0, 0.0).into(),
++        ));
++        let per_rect_uniforms_buffer = new_metal_buffer(
++            self.ctx.device,
++            &per_rect_uniforms,
++            MTLResourceOptions::StorageModeManaged,
++        );
++
++        let uniforms = shader::Uniforms::new(self.ctx.drawable_size.into());
++        let uniforms_ptr = NonNull::from(&uniforms).cast::<c_void>();
++        let uniforms_len = std::mem::size_of::<shader::Uniforms>();
++
++        // SAFETY: the per-rect uniform buffer and `uniforms` value outlive this encoded draw
++        // call, and the bound buffer/byte sizes and indices match the shader bindings.
++        unsafe {
++            self.command_encoder.setVertexBuffer_offset_atIndex(
++                Some(&per_rect_uniforms_buffer),
++                0,
++                1,
++            );
++            self.command_encoder
++                .setVertexBytes_length_atIndex(uniforms_ptr, uniforms_len, 2);
++            self.command_encoder
++                .setFragmentBytes_length_atIndex(uniforms_ptr, uniforms_len, 0);
++        }
++
++        let (_, texture) = self
++            .resources
++            .texture_cache
++            .get_or_insert_by_asset(asset, |asset| {
++                let width = asset.size().x() as usize;
++                let height = asset.size().y() as usize;
++
++                let texture_descriptor = MTLTextureDescriptor::new();
++                texture_descriptor.setPixelFormat(MTLPixelFormat::RGBA8Unorm);
++                // SAFETY: width/height come from a decoded asset and are within Metal limits.
++                unsafe {
++                    texture_descriptor.setWidth(width);
++                    texture_descriptor.setHeight(height);
++                }
++                let texture = self
++                    .ctx
++                    .device
++                    .newTextureWithDescriptor(&texture_descriptor)
++                    .expect("device should create an RGBA8 texture");
++                let region = MTLRegion {
++                    origin: MTLOrigin { x: 0, y: 0, z: 0 },
++                    size: MTLSize {
++                        width,
++                        height,
++                        depth: 1,
++                    },
++                };
++
++                let bytes_per_row: usize = 4 * width;
++                // SAFETY: rgba_bytes holds width*height*4 bytes laid out to match the region
++                // and row stride.
++                unsafe {
++                    texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
++                        region,
++                        0,
++                        NonNull::new(asset.rgba_bytes().as_ptr() as *mut c_void)
++                            .expect("asset rgba bytes pointer is non-null"),
++                        bytes_per_row,
++                    );
++                }
++
++                texture
++            });
++
++        // SAFETY: the bound texture and quad index buffer outlive this encoded draw call.
++        unsafe {
++            self.command_encoder
++                .setFragmentTexture_atIndex(Some(&**texture), 0);
++
++            self.command_encoder
++                .drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount(
++                    MTLPrimitiveType::Triangle,
++                    6,
++                    MTLIndexType::UInt16,
++                    &self.resources.quad_indices,
++                    0,
++                    per_rect_uniforms.len(),
++                );
++        }
++    }
++
++    fn draw_images(&mut self, layer: &Layer) {
++        if layer.images.is_empty() && layer.icons.is_empty() {
++            // It's a mac assertion error to create an empty metal buffer, so exit early
++            return;
++        }
++
++        self.command_encoder
++            .setRenderPipelineState(&self.resources.draw_images_pipeline_state);
++        // SAFETY: index 0 binds the shared quad vertex buffer, which outlives the draw calls.
++        unsafe {
++            self.command_encoder.setVertexBuffer_offset_atIndex(
++                Some(&self.resources.quad_vertices),
++                0,
++                0,
++            );
++        }
++
++        for image in &layer.images {
++            self.render_image_or_icon(Some(image), None);
++        }
++
++        // Another iteration for rendering icons.
++        for icon in &layer.icons {
++            self.render_image_or_icon(None, Some(icon));
++        }
++    }
++
++    fn draw_rects(&self, layer: &Layer) {
++        if layer.rects.is_empty() {
++            // It's a mac assertion error to create an empty metal buffer, so exit early
++            return;
++        }
++
++        self.command_encoder
++            .setRenderPipelineState(&self.resources.draw_rects_pipeline_state);
++        // SAFETY: index 0 binds the shared quad vertex buffer, which outlives the draw call.
++        unsafe {
++            self.command_encoder.setVertexBuffer_offset_atIndex(
++                Some(&self.resources.quad_vertices),
++                0,
++                0,
++            );
++        }
++
++        let mut per_rect_uniforms = Vec::new();
++        for rect in &layer.rects {
++            let scale_factor = self.scene.scale_factor();
++            let bounds = rect.bounds * scale_factor;
++
++            let dash = rect
++                .border
++                .dash
++                .map(|mut dash| {
++                    dash.dash_length *= scale_factor;
++                    dash.gap_length *= scale_factor;
++                    dash
++                })
++                .unwrap_or_default();
++            let horizontal_gap = get_best_dash_gap(bounds.width(), dash);
++            let vertical_gap = get_best_dash_gap(bounds.height(), dash);
++            let dash_length = dash.dash_length;
++            let gap_lengths = Vector2F::new(horizontal_gap, vertical_gap);
++
++            if let Some(drop_shadow) = rect.drop_shadow {
++                let sigma = drop_shadow.blur_radius;
++                let padding = drop_shadow.spread_radius * self.scene.scale_factor();
++                let shadow_origin =
++                    bounds.origin() + drop_shadow.offset * self.scene.scale_factor() - padding;
++                let shadow_size = bounds.size() + vec2f(2. * padding, 2. * padding);
++
++                let min_dimension = f32::min(shadow_size.x(), shadow_size.y());
++
++                let corner_radius = crate::rendering::CornerRadius::from_ui_corner_radius(
++                    rect.corner_radius,
++                    scale_factor,
++                    min_dimension,
++                );
++
++                // For the drop shadow case, we pass in a rect with the bounds
++                // of the shadow and render that before rendering the actual rect.
++                per_rect_uniforms.push(shader::PerRectUniforms::new(
++                    shadow_origin.into(),
++                    shadow_size.into(),
++                    corner_radius,
++                    0_f32,
++                    0_f32,
++                    0_f32,
++                    0_f32,
++                    Vector2F::zero().into(),
++                    Vector2F::zero().into(),
++                    ColorU::transparent_black().to_f32().into(),
++                    ColorU::transparent_black().to_f32().into(),
++                    Vector2F::zero().into(),
++                    Vector2F::zero().into(),
++                    ColorU::transparent_black().to_f32().into(),
++                    ColorU::transparent_black().to_f32().into(),
++                    false,
++                    ColorU::transparent_black().to_f32().into(),
++                    (drop_shadow.offset * self.scene.scale_factor()).into(),
++                    drop_shadow.color.to_f32().into(),
++                    sigma * self.scene.scale_factor(),
++                    padding,
++                    dash_length,
++                    gap_lengths.into(),
++                ));
++            }
++
++            let min_dimension = f32::min(bounds.height(), bounds.width());
++            let corner_radius = crate::rendering::CornerRadius::from_ui_corner_radius(
++                rect.corner_radius,
++                scale_factor,
++                min_dimension,
++            );
++
++            per_rect_uniforms.push(shader::PerRectUniforms::new(
++                bounds.origin().into(),
++                bounds.size().into(),
++                corner_radius,
++                rect.border.top_width() * scale_factor,
++                rect.border.right_width() * scale_factor,
++                rect.border.bottom_width() * scale_factor,
++                rect.border.left_width() * scale_factor,
++                rect.background.start().into(),
++                rect.background.end().into(),
++                rect.background.start_color().to_f32().into(),
++                rect.background.end_color().to_f32().into(),
++                rect.border.color.start().into(),
++                rect.border.color.end().into(),
++                rect.border.color.start_color().to_f32().into(),
++                rect.border.color.end_color().to_f32().into(),
++                false,
++                ColorU::transparent_black().to_f32().into(),
++                Vector2F::zero().into(),
++                ColorU::transparent_black().to_f32().into(),
++                0_f32,
++                0_f32,
++                dash_length,
++                gap_lengths.into(),
++            ));
++        }
++        let per_rect_uniforms_buffer = new_metal_buffer(
++            self.ctx.device,
++            &per_rect_uniforms,
++            MTLResourceOptions::StorageModeManaged,
++        );
++
++        let uniforms = shader::Uniforms::new(self.ctx.drawable_size.into());
++        let uniforms_ptr = NonNull::from(&uniforms).cast::<c_void>();
++        let uniforms_len = std::mem::size_of::<shader::Uniforms>();
++
++        // SAFETY: the per-rect uniform buffer and `uniforms` value outlive this encoded draw
++        // call, and the bound buffer/byte sizes and indices match the shader bindings.
++        unsafe {
++            self.command_encoder.setVertexBuffer_offset_atIndex(
++                Some(&per_rect_uniforms_buffer),
++                0,
++                1,
++            );
++            self.command_encoder
++                .setVertexBytes_length_atIndex(uniforms_ptr, uniforms_len, 2);
++            self.command_encoder
++                .setFragmentBytes_length_atIndex(uniforms_ptr, uniforms_len, 0);
++
++            self.command_encoder
++                .drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount(
++                    MTLPrimitiveType::Triangle,
++                    6,
++                    MTLIndexType::UInt16,
++                    &self.resources.quad_indices,
++                    0,
++                    per_rect_uniforms.len(),
++                );
++        }
++    }
++
++    fn draw_glyphs(&mut self, layer: &Layer) {
++        if layer.glyphs.is_empty() {
++            // It's a mac assertion error to create an empty metal buffer, so exit early
++            return;
++        }
++
++        self.command_encoder
++            .setRenderPipelineState(&self.resources.draw_glyphs_pipeline_state);
++        // SAFETY: index 0 binds the shared quad vertex buffer, which outlives the draw calls.
++        unsafe {
++            self.command_encoder.setVertexBuffer_offset_atIndex(
++                Some(&self.resources.quad_vertices),
++                0,
++                0,
++            );
++        }
++
++        let scale_factor = self.scene.scale_factor();
++
++        let mut texture_to_glyph: HashMap<TextureId, Vec<shader::PerGlyphUniforms>> =
++            HashMap::new();
++        for glyph in &layer.glyphs {
++            let glyph_position = glyph.position * scale_factor;
++            let subpixel_alignment = SubpixelAlignment::new(glyph_position);
++
++            match self.resources.glyph_cache.get(
++                glyph.glyph_key,
++                self.scene.scale_factor(),
++                subpixel_alignment,
++                &|atlas_size| create_new_texture_atlas(atlas_size, self.ctx.device),
++                &insert_glyph_into_texture,
++                &|glyph_key, scale, alignment| {
++                    self.ctx.glyph_raster_bounds(glyph_key, scale, alignment)
++                },
++                &|glyph_key, scale, subpixel_alignment, glyph_config, format| {
++                    self.ctx.rasterize_glyph(
++                        glyph_key,
++                        scale,
++                        subpixel_alignment,
++                        glyph_config,
++                        format,
++                    )
++                },
++            ) {
++                Ok(Some(gto)) => {
++                    let (fade_start, fade_end) = match &glyph.fade {
++                        None => (&0.0, &-1.0),
++                        Some(GlyphFade::Horizontal { start, end }) => (start, end),
++                    };
++
++                    // Adjust the horizontal position by the subpixel alignment
++                    // so that we only shift the glyph over by the amount that
++                    // isn't accounted for in the subpixel-rasterized glyph.
++                    let glyph_position = glyph_position - subpixel_alignment.to_offset();
++
++                    // Make sure to pass the glyph size in the atlas
++                    // Not the size of the render bounds (which may be smaller)
++                    // If you pass the render bounds as the size, the shader
++                    // will try to sample from a smaller area than the size
++                    // in the atlas, leading to artifacts.
++                    let uv_region = gto.allocated_region.uv_region;
++                    let uniform = shader::PerGlyphUniforms::new(
++                        (glyph_position + gto.raster_bounds.origin()).into(),
++                        gto.allocated_region.pixel_region.size().to_f32().into(),
++                        uv_region.origin_x(),
++                        uv_region.origin_y(),
++                        uv_region.width(),
++                        uv_region.height(),
++                        fade_start * scale_factor,
++                        fade_end * scale_factor,
++                        glyph.color.to_f32().into(),
++                        gto.is_emoji,
++                    );
++
++                    if let Some(per_glyph_uniforms) = texture_to_glyph.get_mut(&gto.texture_id) {
++                        per_glyph_uniforms.push(uniform);
++                    } else {
++                        texture_to_glyph.insert(gto.texture_id, vec![uniform]);
++                    }
++                }
++                Ok(None) => {}
++                Err(_) => {
++                    warp_errors::report_error!(
++                        "Unable to get glyph out of glyph cache",
++                        extra: { "glyph" => ?glyph }
++                    );
++                    return;
++                }
++            }
++        }
++
++        if texture_to_glyph.is_empty() {
++            // Early exit if there are no glyphs to render, as it causes a debug assert
++            // failure in the metal code to create an empty metal buffer.
++            return;
++        }
++
++        for (texture_id, per_glyph_uniforms) in texture_to_glyph {
++            let per_glyph_uniforms_buffer = new_metal_buffer(
++                self.ctx.device,
++                &per_glyph_uniforms,
++                MTLResourceOptions::StorageModeManaged,
++            );
++
++            let uniforms = shader::Uniforms::new(self.ctx.drawable_size.into());
++            let uniforms_ptr = NonNull::from(&uniforms).cast::<c_void>();
++            let uniforms_len = std::mem::size_of::<shader::Uniforms>();
++
++            let texture = self
++                .resources
++                .glyph_cache
++                .texture(&texture_id)
++                .expect("texture ID should be in atlas");
++
++            // SAFETY: the per-glyph uniform buffer, `uniforms` value, bound texture, and quad
++            // index buffer outlive this encoded draw call, and the bound sizes/indices match the
++            // shader bindings.
++            unsafe {
++                self.command_encoder.setVertexBuffer_offset_atIndex(
++                    Some(&per_glyph_uniforms_buffer),
++                    0,
++                    1,
++                );
++                self.command_encoder
++                    .setVertexBytes_length_atIndex(uniforms_ptr, uniforms_len, 2);
++                self.command_encoder
++                    .setFragmentTexture_atIndex(Some(&**texture), 0);
++                self.command_encoder
++                    .drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount(
++                        MTLPrimitiveType::Triangle,
++                        6,
++                        MTLIndexType::UInt16,
++                        &self.resources.quad_indices,
++                        0,
++                        per_glyph_uniforms.len(),
++                    );
++            }
++        }
++    }
++}
++
++impl Drop for Frame<'_> {
++    fn drop(&mut self) {
++        self.resources.texture_cache.end_frame();
++    }
++}
++
++fn new_metal_buffer<T>(
++    device: &ProtocolObject<dyn MTLDevice>,
++    data: &[T],
++    options: MTLResourceOptions,
++) -> Retained<ProtocolObject<dyn MTLBuffer>> {
++    // SAFETY: `data` points to `size_of_val(data)` initialized bytes; Metal copies them into the
++    // new buffer, so the pointer only needs to be valid for the duration of this call.
++    unsafe {
++        device.newBufferWithBytes_length_options(
++            NonNull::new(data.as_ptr() as *mut c_void).expect("buffer data pointer is non-null"),
++            std::mem::size_of_val(data),
++            options,
++        )
++    }
++    .expect("device should create a buffer")
++}
++
++/// Writes the bytes of the `glyph` into a region of the current texture identified by `region`.
++fn insert_glyph_into_texture(
++    region: AllocatedRegion,
++    glyph: &RasterizedGlyph,
++    texture: &mut Retained<ProtocolObject<dyn MTLTexture>>,
++) {
++    let region = MTLRegion {
++        origin: MTLOrigin {
++            x: region.pixel_region.origin_x() as usize,
++            y: region.pixel_region.origin_y() as usize,
++            z: 0,
++        },
++        size: MTLSize {
++            width: region.pixel_region.width() as usize,
++            height: region.pixel_region.height() as usize,
++            depth: 1,
++        },
++    };
++
++    let bytes_per_row: usize = 4 * (glyph.canvas.size.x() as usize);
++    // SAFETY: the glyph canvas holds at least `bytes_per_row * region.height` bytes laid out to
++    // match the destination region.
++    unsafe {
++        texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
++            region,
++            0,
++            NonNull::new(glyph.canvas.pixels.as_slice().as_ptr() as *mut c_void)
++                .expect("glyph canvas pixel pointer is non-null"),
++            bytes_per_row,
++        );
++    }
++}
++
++/// Creates a new texture atlas for use in the cache.
++fn create_new_texture_atlas(
++    atlas_size: usize,
++    device: &ProtocolObject<dyn MTLDevice>,
++) -> Retained<ProtocolObject<dyn MTLTexture>> {
++    let texture_descriptor = MTLTextureDescriptor::new();
++    texture_descriptor.setPixelFormat(MTLPixelFormat::RGBA8Unorm);
++    // SAFETY: `atlas_size` is a fixed, valid texture dimension within Metal limits.
++    unsafe {
++        texture_descriptor.setWidth(atlas_size);
++        texture_descriptor.setHeight(atlas_size);
++    }
++    device
++        .newTextureWithDescriptor(&texture_descriptor)
++        .expect("device should create an atlas texture")
++}
+diff --git a/crates/warpui/src/platform/mac/rendering/metal/shaders/shader_types.h b/crates/warpui/src/platform/mac/rendering/metal/shaders/shader_types.h
+index 4f549d7c..cd36db94 100644
+--- a/crates/warpui/src/platform/mac/rendering/metal/shaders/shader_types.h
++++ b/crates/warpui/src/platform/mac/rendering/metal/shaders/shader_types.h
+@@ -49,4 +49,14 @@ typedef struct {
+   int is_emoji;
+ } PerGlyphUniforms;
+ 
++// Shared uniforms for the full-screen celestial post-process pass. The fields
++// are effect-agnostic: `fill` is the 0..1 activity level that drives the look,
++// `time` animates it, and `viewport_size` is used for aspect correction. Both
++// the blackhole and sun fragment shaders consume this same struct.
++typedef struct {
++  vector_float2 viewport_size;
++  float fill;
++  float time;
++} EffectUniforms;
++
+ #endif // shader_types_h
+diff --git a/crates/warpui/src/platform/mac/rendering/metal/shaders/shaders.metal b/crates/warpui/src/platform/mac/rendering/metal/shaders/shaders.metal
+index 8b3eef7a..8083cb65 100644
+--- a/crates/warpui/src/platform/mac/rendering/metal/shaders/shaders.metal
++++ b/crates/warpui/src/platform/mac/rendering/metal/shaders/shaders.metal
+@@ -400,3 +400,278 @@ fragment float4 glyph_fragment_shader(
+     color.a *= saturate(in.fade_alpha);
+     return color;
+ }
++
++// ---- Celestial post-process pass ----
++//
++// A full-screen pass that overlays an animated celestial effect on top of the
++// rendered terminal scene. The vertex stage is shared; the specific look is
++// chosen by which fragment function the pipeline is built with
++// (blackhole_fragment / sun_fragment). All effects read the same EffectUniforms.
++
++struct EffectFragmentData
++{
++    float4 position [[position]];
++    float2 uv;
++};
++
++vertex EffectFragmentData
++effect_vertex(uint vertex_id [[vertex_id]])
++{
++    float2 p = float2(float((vertex_id << 1) & 2), float(vertex_id & 2)); // (0,0) (2,0) (0,2)
++    EffectFragmentData out;
++    out.position = float4(p * 2.0 - 1.0, 0.0, 1.0);
++    // y-down UV so that uv.y=0 is the top of the screen, matching the framebuffer row order.
++    out.uv = float2(p.x, 1.0 - p.y);
++    return out;
++}
++
++fragment float4 blackhole_fragment(
++    EffectFragmentData in [[stage_in]],
++    texture2d<float> scene_texture [[texture(0)]],
++    constant EffectUniforms *uniforms [[buffer(0)]])
++{
++    constexpr sampler scene_sampler(address::clamp_to_edge, filter::linear);
++    float fill = saturate(uniforms->fill);
++    float time = uniforms->time;
++    // No active session / no data: pass through the scene unchanged.
++    if (fill <= 0.0) {
++        return scene_texture.sample(scene_sampler, in.uv);
++    }
++
++    // Work in aspect-corrected "square" coordinates where 1 unit == the full
++    // screen height. Computing the radius here (instead of in raw 0..1 UV)
++    // makes the shadow and rings render as true circles on any window shape.
++    float aspect = uniforms->viewport_size.x / max(uniforms->viewport_size.y, 1.0);
++
++    // The blackhole's center drifts around the screen on a slow Lissajous path:
++    // two incommensurate frequencies plus a phase offset make it wander
++    // up/down/left/right rather than tracing a circle or a straight line. The
++    // amplitude is a fraction of the screen height, small enough to stay on
++    // screen yet clearly mobile.
++    float2 center = float2(
++        0.22 * sin(time * 0.60),
++        0.22 * sin(time * 0.40 + 2.0));
++
++    // Position relative to the (moving) blackhole center, in square space.
++    float2 p = float2((in.uv.x - 0.5) * aspect, in.uv.y - 0.5) - center;
++    float r = length(p);
++    float2 dir = p / max(r, 0.0001);
++
++    // The shadow/horizon grows with the fill level (kept deliberately compact).
++    float r_shadow = 0.03 + 0.05 * fill;
++    float r_ring = r_shadow * 1.5;
++
++    // Gravitational lensing: deflect the sample coordinate outward (in square
++    // space, relative to the hole) so the background wraps around the shadow,
++    // then map back into screen UV for the lookup — adding the hole's offset
++    // back in so the lens tracks the moving center correctly.
++    float bend = (r_shadow * r_shadow) / max(r, r_shadow * 0.5);
++    float2 p_lens = p + dir * (bend * 0.6);
++    float2 lens_uv = float2((p_lens.x + center.x) / aspect + 0.5, (p_lens.y + center.y) + 0.5);
++    lens_uv = clamp(lens_uv, 0.0, 1.0);
++    float3 bg = scene_texture.sample(scene_sampler, lens_uv).rgb;
++
++    // Einstein-ring glow: brighten the lensed background just inside the disk.
++    bg *= 1.0 + 0.35 * smoothstep(r_ring * 1.3, r_ring * 0.9, r);
++
++    // Relativistic Doppler beaming: the side of the disk rotating toward the
++    // viewer is noticeably brighter — the signature EHT crescent. It stays fixed
++    // in screen space (it is set by the disk's orientation) while matter flows
++    // through it, so it reads as a stable bright lobe with structure rotating
++    // beneath it.
++    float beam = mix(0.30, 1.25, 0.5 + 0.5 * (-dir.x));
++
++    // Polar angle, used for everything that rotates.
++    float ang = atan2(dir.y, dir.x);
++
++    // Orbital motion — quick enough to read as clearly alive at a glance, but
++    // not frantic. (~4 s per turn.)
++    float spin = time * 1.6;
++
++    // Two spiral arms of infalling matter that rotate around the shadow.
++    float arms = 0.55 + 0.45 * sin(ang * 2.0 - spin + r * 22.0);
++
++    // Turbulent flicker: the accretion plasma is chaotic, so its brightness
++    // shimmers. A few incommensurate frequencies keep it from reading as a
++    // clean mechanical pulse; amplitude is deliberately modest.
++    float flicker = 1.0
++        + 0.14 * sin(ang * 3.0 + time * 5.0)
++        + 0.10 * sin(ang * 7.0 - time * 3.3 + r * 40.0)
++        + 0.08 * sin(time * 8.1 + r * 90.0);
++
++    // Accretion disk: thin, hot ring, white-hot core fading to amber, carved by
++    // the arms and shimmering with turbulence.
++    float disk = exp(-pow((r - r_ring) / 0.014, 2.0)) * arms;
++    float3 disk_hot = float3(1.0, 0.95, 0.85);
++    float3 disk_cool = float3(1.0, 0.55, 0.18);
++    float3 disk_col = mix(disk_hot, disk_cool, smoothstep(r_ring - 0.02, r_ring + 0.03, r));
++    float3 col = bg + disk_col * disk * 3.0 * fill * beam * flicker;
++
++    // A bright hotspot orbiting the ring (a clump of matter), so the spin is obvious.
++    float d_ang = atan2(sin(ang - spin), cos(ang - spin));
++    float beacon = exp(-pow(d_ang / 0.4, 2.0)) * exp(-pow((r - r_ring) / 0.018, 2.0));
++    col += float3(1.0, 0.92, 0.75) * beacon * 3.5 * fill;
++
++    // Inner photon ring: razor-thin, near-white, with a faint slow pulse.
++    float photon = exp(-pow((r - r_shadow * 1.12) / 0.0045, 2.0));
++    col += float3(1.0, 0.92, 0.8) * photon * 2.0 * fill * (1.0 + 0.12 * sin(time * 2.0));
++
++    // Event horizon: pure black shadow with a crisp edge.
++    float horizon = smoothstep(r_shadow, r_shadow * 0.96, r);
++    col = mix(col, float3(0.0), horizon);
++
++    // Fade the whole effect in/out based on fill.
++    float effect_alpha = saturate(fill * 1.6);
++    float3 original = scene_texture.sample(scene_sampler, in.uv).rgb;
++    return float4(mix(original, col, effect_alpha), 1.0);
++}
++
++// ---- Noise helpers (organic, non-banded texture for the sun) ----
++// Sin-based patterns read as fake and banded; value noise + fbm give the
++// boiling surface and irregular corona that make a star look real.
++
++float cel_hash(float2 p)
++{
++    p = fract(p * float2(123.34, 456.21));
++    p += dot(p, p + 45.32);
++    return fract(p.x * p.y);
++}
++
++float cel_noise(float2 p)
++{
++    float2 i = floor(p);
++    float2 f = fract(p);
++    float2 u = f * f * (3.0 - 2.0 * f);
++    float a = cel_hash(i);
++    float b = cel_hash(i + float2(1.0, 0.0));
++    float c = cel_hash(i + float2(0.0, 1.0));
++    float d = cel_hash(i + float2(1.0, 1.0));
++    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
++}
++
++float cel_fbm(float2 p)
++{
++    float v = 0.0;
++    float amp = 0.5;
++    for (int i = 0; i < 4; i++) {
++        v += amp * cel_noise(p);
++        p *= 2.02;
++        amp *= 0.5;
++    }
++    return v;
++}
++
++// A realistic glowing sun: a limb-darkened (spherically shaded) photosphere with
++// boiling noise granulation, a soft irregular corona, and noise-driven pulsing
++// active regions. Size and intensity track `fill`; it drifts like the blackhole.
++// It emits light (additive) rather than swallowing it; no gravitational lensing.
++fragment float4 sun_fragment(
++    EffectFragmentData in [[stage_in]],
++    texture2d<float> scene_texture [[texture(0)]],
++    constant EffectUniforms *uniforms [[buffer(0)]])
++{
++    constexpr sampler scene_sampler(address::clamp_to_edge, filter::linear);
++    float3 original = scene_texture.sample(scene_sampler, in.uv).rgb;
++    float fill = saturate(uniforms->fill);
++    if (fill <= 0.0) {
++        return float4(original, 1.0);
++    }
++    float time = uniforms->time;
++
++    // Aspect-corrected square space; same gentle wander as the blackhole.
++    float aspect = uniforms->viewport_size.x / max(uniforms->viewport_size.y, 1.0);
++    float2 center = float2(
++        0.22 * sin(time * 0.60),
++        0.22 * sin(time * 0.40 + 2.0));
++    float2 p = float2((in.uv.x - 0.5) * aspect, in.uv.y - 0.5) - center;
++    float r = length(p);
++    float ang = atan2(p.y, p.x);
++    float2 circ = float2(cos(ang), sin(ang)); // seamless angular coordinate
++
++    // Bold, close-up sun that scales strongly with activity.
++    float r_sun = (0.05 + 0.11 * fill) * (1.0 + 0.02 * sin(time * 1.5));
++    float rn = r / r_sun; // 0 center, 1 limb
++
++    float3 col = original;
++
++    // White-light corona: a faint smooth halo (real suns show little corona in
++    // white light), with only the gentlest wisp so it never reads as a starburst.
++    float wisp = 1.0 + 0.10 * cel_fbm(float2(ang * 4.0, rn * 3.0) + time * 0.10);
++    float corona = exp(-max(rn - 1.0, 0.0) / 0.35) * wisp;
++    col += float3(1.0, 0.42, 0.12) * corona * 0.6 * fill;
++
++    // Thin warm limb atmosphere (irregular so it's glowing gas, not a neon ring).
++    float limb_noise = 0.7 + 0.6 * cel_fbm(circ * 4.0 + float2(time * 0.15, -time * 0.1));
++    float chromo = exp(-pow((rn - 1.0) / 0.04, 2.0)) * limb_noise;
++    col += float3(1.0, 0.55, 0.18) * chromo * 1.0 * fill;
++
++    // Pulsing active regions near the limb (耀斑脉动), kept subtle.
++    float active = cel_fbm(circ * 3.5 + float2(-time * 0.2, time * 0.15));
++    active = smoothstep(0.62, 0.92, active);
++    float flare_pulse = 0.6 + 0.4 * sin(time * 2.5);
++    col += float3(1.0, 0.50, 0.16) * active * corona * flare_pulse * 0.8 * fill;
++
++    // Ejected embers / sparks: procedural particles flying off the limb and
++    // cooling as they travel. Faked in-shader (no particle buffer) by looping a
++    // fixed set, each with a hashed launch angle, speed, phase and reach. The
++    // radius cull skips the loop on pixels far from the sun to protect the frame
++    // rate.
++    if (r < r_sun * 3.0) {
++        for (int i = 0; i < 32; i++) {
++            float fi = float(i);
++            float a0 = cel_hash(float2(fi, 1.7)) * 6.2831853;
++            float spd = 0.15 + cel_hash(float2(fi, 3.1)) * 0.35;
++            float ph = cel_hash(float2(fi, 5.9));
++            float reach = 0.5 + cel_hash(float2(fi, 7.3)) * 1.2;
++            float tang = (cel_hash(float2(fi, 8.8)) - 0.5) * 0.8;
++            float life = fract(time * spd + ph);
++            float rad = r_sun * (1.0 + life * reach);
++            float a = a0 + tang * life;
++            float2 off = float2(cos(a), sin(a)) * rad;
++            float d = length(p - off);
++            float size = 0.0025 + 0.0025 * cel_hash(float2(fi, 2.2));
++            float dotp = exp(-(d * d) / (size * size));
++            float fade = smoothstep(0.0, 0.1, life) * (1.0 - life);
++            float3 pcol = mix(float3(1.0, 0.95, 0.7), float3(1.0, 0.35, 0.08), life);
++            col += pcol * dotp * fade * 2.5 * fill;
++        }
++    }
++
++    // Photosphere: vivid, limb-darkened disk with fine granulation plus larger
++    // mottling (supergranulation) and sunspots — the look of a real photo.
++    float mu = sqrt(max(1.0 - rn * rn, 0.0));
++    float limb = 0.35 + 0.65 * pow(mu, 0.45); // edge redder/dimmer (limb darkening)
++    float g = cel_fbm(p * 75.0 + float2(time * 0.12, -time * 0.25));
++    g = smoothstep(0.30, 0.72, g);            // crisp cells vs dark intergranular lanes
++    float gran = 0.55 + 0.65 * g;
++    float big = cel_fbm(p * 12.0 + time * 0.02); // large-scale mottling
++    float3 core_col = float3(1.0, 0.72, 0.24);
++    float3 mid_col = float3(1.0, 0.42, 0.07);
++    float3 limb_col = float3(0.62, 0.12, 0.02);
++    float t_limb = pow(1.0 - mu, 1.4);
++    float3 surf_col = mix(core_col, mid_col, smoothstep(0.0, 0.50, t_limb));
++    surf_col = mix(surf_col, limb_col, smoothstep(0.50, 1.0, t_limb));
++    surf_col *= limb * gran * (0.85 + 0.30 * big);
++
++    // Sunspots: dark umbra + softer penumbra + a faint faculae ring. Fixed on the
++    // disk and faded near the limb so they look like they sit on the sphere.
++    float2 dn = p / r_sun;
++    float sd1 = length(dn - float2(0.28, -0.18));
++    float sd2 = length(dn - float2(-0.34, 0.22));
++    float sd3 = length(dn - float2(0.05, 0.40));
++    float umbra = min(1.0, smoothstep(0.07, 0.02, sd1) + smoothstep(0.05, 0.015, sd2) + smoothstep(0.04, 0.012, sd3));
++    float penum = min(1.0, smoothstep(0.16, 0.05, sd1) + smoothstep(0.12, 0.04, sd2) + smoothstep(0.10, 0.03, sd3));
++    float spot_fade = smoothstep(0.10, 0.40, mu);
++    umbra *= spot_fade;
++    penum *= spot_fade;
++    surf_col *= mix(1.0, 0.55, penum) * mix(1.0, 0.15, umbra);
++    float fac = (smoothstep(0.20, 0.12, sd1) - smoothstep(0.10, 0.05, sd1)) * spot_fade;
++    surf_col += float3(1.0, 0.70, 0.30) * fac * 0.25 * mu;
++
++    surf_col += float3(1.0, 0.60, 0.20) * pow(g, 4.0) * 0.35 * mu; // warm hot cells
++    float surf = smoothstep(1.0, 0.97, rn);
++    col = mix(col, surf_col, surf);
++
++    float effect_alpha = saturate(fill * 1.6);
++    return float4(mix(original, col, effect_alpha), 1.0);
++}
+diff --git a/crates/warpui/src/platform/mac/rendering/renderer.rs b/crates/warpui/src/platform/mac/rendering/renderer.rs
+index 5c816511..b64c77b2 100644
+--- a/crates/warpui/src/platform/mac/rendering/renderer.rs
++++ b/crates/warpui/src/platform/mac/rendering/renderer.rs
+@@ -22,6 +22,15 @@ pub trait Renderer {
+     fn render(&mut self, scene: &Scene, window: &WindowState, font_cache: &fonts::Cache);
+ 
+     fn resize(&mut self, window: &WindowState);
++
++    /// Whether the blackhole post-process is currently active (fill > 0).
++    ///
++    /// Polled by the window layer after each frame to keep requesting redraws
++    /// (advancing the shader's `time`) while the effect is on. The Metal backend
++    /// overrides this; other backends default to false.
++    fn blackhole_active(&self) -> bool {
++        false
++    }
+ }
+ 
+ /// Set of available physical graphics devices that can be used to render.
+diff --git a/crates/warpui/src/platform/mac/window.rs b/crates/warpui/src/platform/mac/window.rs
+index ec68a489..e9a0c433 100644
+--- a/crates/warpui/src/platform/mac/window.rs
++++ b/crates/warpui/src/platform/mac/window.rs
+@@ -1398,6 +1398,7 @@ extern "C-unwind" fn warp_view_set_frame_size(this: &Object, size: NSSize, async
+ 
+ #[no_mangle]
+ extern "C-unwind" fn warp_update_layer(this: &Object) {
++    use warpui_core::platform::WindowContext;
+     if !app::callback_dispatcher().can_borrow_mut() {
+         #[cfg(debug_assertions)]
+         log::warn!(
+@@ -1452,6 +1453,21 @@ extern "C-unwind" fn warp_update_layer(this: &Object) {
+             renderer.render(&scene, window.as_ref(), ctx.font_cache());
+         });
+ 
++        // Blackhole animation: Warp only redraws on dirty events, so a static
++        // scene (like the login screen) would freeze the shader's `time` and
++        // leave the accretion disk standing still. While the effect is active we
++        // re-request a frame, so the next vsync re-runs render() with an
++        // advanced time and the disk swirls. This stops on its own once the fill
++        // level returns to 0.
++        //
++        // TODO: request_redraw() also drops the cached scene, forcing a rebuild
++        // each frame. For the empty login scene that is free; if it ever matters
++        // on a full terminal, add a scene-preserving "poke" that only calls
++        // setNeedsDisplayAsync.
++        if renderer.blackhole_active() {
++            Window(window.clone()).request_redraw();
++        }
++
+         app::callback_dispatcher()
+             .for_window(&Window(window.clone()))
+             .frame_drawn();

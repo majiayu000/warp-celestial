@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""Minimal stub for `warp-channel-config` to let local Warp builds launch.
+
+This is only for local development/visual verification. It returns a minimal
+production-shaped ChannelConfig JSON for any channel/target.
+
+Usage: copy this file to `warp-channel-config` (drop the .example suffix),
+chmod +x it, and put its directory on PATH when building/running Warp.
+Replace the firebase_auth_api_key placeholder below with a value from your
+own environment if the build needs one."""
+
+import json
+import sys
+
+
+def main():
+    # Accept (and ignore) --channel, --target-family, --target-os.
+    _ = sys.argv[1:]
+
+    config = {
+        "app_id": "com.warp.Warp",
+        "logfile_name": "warp.log",
+        "server_config": {
+            "server_root_url": "https://app.warp.dev",
+            "rtc_server_url": "wss://rtc.app.warp.dev/graphql/v2",
+            "session_sharing_server_url": "wss://sessions.app.warp.dev",
+            "firebase_auth_api_key": "YOUR_FIREBASE_AUTH_API_KEY",
+            "iap_config": None,
+        },
+        "oz_config": {
+            "oz_root_url": "https://oz.warp.dev",
+            "workload_audience_url": None,
+        },
+        "telemetry_config": None,
+        "autoupdate_config": None,
+        "crash_reporting_config": None,
+        "mcp_static_config": None,
+    }
+    print(json.dumps(config))
+
+
+if __name__ == "__main__":
+    main()

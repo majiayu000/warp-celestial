@@ -1,0 +1,5 @@
+/target
+# Local Warp fork (25 GB working copy); only the patch in patches/ is published.
+/warp/
+# Real channel-config stub contains a firebase key; only the .example is published.
+/warp-channel-config
