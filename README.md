@@ -1,88 +1,284 @@
-# warp-celestial
+# Warp Celestial
 
-A full-screen celestial post-process for the [Warp](https://github.com/warpdotdev/warp)
-terminal on macOS (Metal renderer): a wandering **black hole** with gravitational
-lensing (default) or a glowing **sun** with corona, sunspots and ejected ember
-particles (`WARP_CELESTIAL=sun`). The body's size and activity scale with your
-**Claude Code context-window fill rate** (a 0..1 value).
+[Chinese version](README.zh-CN.md)
 
-![blackhole](blackhole.png)
+Warp Celestial adds an animated black hole or sun to the macOS Metal renderer
+in [Warp](https://github.com/warpdotdev/warp). The effect bends or illuminates
+the terminal scene, and its size follows the current Claude Code context-window
+usage.
+
+![Warp Celestial black hole](blackhole.png)
+
+## Requirements
+
+- macOS
+- The full Xcode app, opened at least once with its additional components installed
+- Rust and Cargo from [rustup](https://rustup.rs)
+- Git and Python 3.8 or newer
+- At least 25 GB of free disk space for the Warp source and build artifacts
+- Homebrew only when `jq` is not already installed
+
+The installer checks these requirements before changing anything. Xcode Command
+Line Tools alone are not enough because the shader must be compiled with the
+Metal toolchain included in the full Xcode app.
+
+## Quick install
+
+```bash
+git clone https://github.com/majiayu000/warp-celestial.git
+cd warp-celestial
+./install.sh
+```
+
+The first build can take 10-30 minutes. The installer explains each long-running
+step and asks before installing build helpers or changing Claude Code settings.
+
+To check the machine without installing anything:
+
+```bash
+./install.sh --check
+```
+
+Useful options:
+
+```text
+--skip-claude-config    Build the app without editing Claude Code settings
+--no-launch             Do not open the app after installation
+--yes                   Accept installer prompts
+```
+
+## What the installer does
+
+1. Verifies macOS, full Xcode, Metal tools, Rust, Python, Git and disk space.
+2. Installs `jq` through Homebrew when needed and installs Warp's pinned
+   `cargo-bundle` version through Cargo.
+3. Clones Warp at the tested commit `69ce3728` into
+   `~/.local/share/warp-celestial/warp`.
+4. Applies `patches/celestial-effect.patch` and builds the public OSS app. No
+   Firebase key or private Warp repository is required.
+5. Installs the app as `~/Applications/Warp Celestial.app`.
+6. Installs the context bridge at
+   `~/.local/share/warp-celestial/claude-token.py` and the launcher at
+   `~/.local/bin/warp-celestial`.
+7. With confirmation, backs up `~/.claude/settings.json`, adds the top-level
+   `statusLine` command, and merges `SessionStart`/`SessionEnd` lifecycle hooks
+   without changing unrelated settings or hooks.
+
+The installer is repeatable. Running it again reuses the pinned source checkout
+and Cargo build cache. If it cannot verify the pinned commit and patch state, it
+stops instead of resetting or deleting the checkout.
+
+## Running it
+
+Restart Claude Code after the first installation so it reloads the status-line
+configuration. Then open `Warp Celestial.app` from `~/Applications`, or use:
+
+```bash
+~/.local/bin/warp-celestial blackhole
+~/.local/bin/warp-celestial sun
+```
+
+The default is `blackhole`. The effect is intentionally hidden when Claude Code
+reports no active context usage. To preview it without waiting for a session:
+
+```bash
+~/.local/bin/warp-celestial --demo
+```
+
+`--demo` writes a temporary 65% fill value to
+`~/.cache/warp/blackhole_context`. The next Claude Code status update replaces
+that value.
+
+If `~/.local/bin` is on your `PATH`, the shorter commands work too:
+
+```bash
+warp-celestial blackhole
+warp-celestial sun
+warp-celestial --demo
+```
 
 ## How it works
 
-1. `claude-token.py` is a Claude Code `statusLine` hook. On every status-line
-   update it computes the context fill ratio and writes it to
-   `~/.cache/warp/blackhole_context` (`SessionStart` → `0.0`, `SessionEnd` →
-   file removed).
-2. The patched Warp reads that file and passes the fill value plus a time
-   uniform into a two-pass Metal composite: the scene renders to an offscreen
-   texture, then a full-screen fragment shader warps/overlays the celestial
-   body (blending disabled on the composite pipeline).
-3. `WARP_CELESTIAL` selects the fragment entry point at renderer init:
-   `sun` → `sun_fragment`, anything else → `blackhole_fragment`. Vertex stage
-   and uniforms are shared.
+The system has two small parts and one patched renderer:
 
-The effect only runs while fill > 0 (i.e. an active Claude Code session), and
-redraws continuously at display rate while active.
+```text
+Claude Code statusLine JSON
+          |
+          v
+claude-token.py
+          |
+          |  writes a number from 0.0 to 1.0
+          v
+~/.cache/warp/blackhole_context
+          |
+          |  sampled by Warp, at most once every 100 ms
+          v
+Warp Metal renderer
+  1. render the normal scene to an offscreen BGRA texture
+  2. sample that texture in a full-screen fragment shader
+  3. apply lensing, disk/corona light and animation
+  4. present the composited frame
+```
 
-## Contents
+### Context bridge
 
-| Path | What |
-|------|------|
-| `patches/celestial-effect.patch` | All Warp source changes (shaders, renderer, build script, window redraw hook) |
-| `claude-token.py` | statusLine hook writing the fill value |
-| `warp-channel-config.example` | Sanitized build-time stub template (see below) |
-| `PLAN.md` | Original design notes |
-| `src/main.rs`, `Cargo.toml`, `Cargo.lock` | Early standalone scaffold (historical, not needed for the effect) |
+Claude Code sends JSON to its configured `statusLine` command. The standalone
+`claude-token.py` script calculates the fill ratio from `used_percentage`, or
+from total tokens divided by context-window size when needed. It clamps the
+result to `0.0..1.0` and writes it atomically as a short text value understood
+by the renderer.
 
-## Applying the patch
+The installer registers the same script for Claude Code's `SessionStart` and
+`SessionEnd` hooks. A start resets the value to zero, and an end removes the
+cache file. Missing or invalid data means zero activity; the renderer does not
+invent a value.
 
-The patch targets `warpdotdev/warp` at base commit `69ce3728`. It may need a
-rebase for newer upstream revisions.
+### Metal renderer
 
-```sh
+The patch changes only Warp's macOS Metal backend. The normal terminal scene is
+rendered into a reusable offscreen texture. A second full-screen pass samples
+that texture and runs one of two fragment shaders:
+
+- `blackhole_fragment`: gravitational lensing, event horizon, photon ring,
+  Doppler-brightened accretion disk and slow drift
+- `sun_fragment`: limb-darkened photosphere, granulation, sunspots, corona and
+  procedural embers
+
+Set `WARP_CELESTIAL=sun` before launch to select the sun. Any other value selects
+the black hole. Both effects use the same viewport size, time and context-fill
+uniforms.
+
+### Resource use
+
+While the fill value is zero, the window uses Warp's normal event-driven redraw
+behavior and the effect is not continuously animated. While it is above zero,
+the window redraws at display rate so the shader can move. The implementation
+reuses the offscreen texture, preserves the cached scene between animation
+frames and reads the context file no more than once every 100 ms.
+
+This still costs more GPU time and memory bandwidth than stock Warp because an
+active effect adds a full-screen render pass. Larger windows, Retina resolution
+and high-refresh-rate displays cost more. Close the custom app or end the Claude
+Code session to stop that continuous rendering.
+
+## Manual installation
+
+The installer is recommended, but the exact source procedure is:
+
+```bash
 git clone --filter=blob:none https://github.com/warpdotdev/warp.git
 cd warp
-git checkout 69ce3728
-git apply /path/to/patches/celestial-effect.patch
-```
+git checkout 69ce3728acae0b01c2f457b65a90c144664686aa
+git apply /path/to/warp-celestial/patches/celestial-effect.patch
 
-Build requires Xcode's Metal toolchain:
+cargo install cargo-bundle \
+  --git https://github.com/burtonageo/cargo-bundle \
+  --rev ae4c76e92c08774bf54ff077b1c52e3d1cd6c16d
 
-```sh
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-cargo build -p warp
+export WARP_BIN_NAME=warp-oss
+export WARP_CHANNEL=oss
+export FEATURES=gui
+./script/macos/run --dont-open
 ```
 
-`build.rs` shells out to a `warp-channel-config` binary that is not part of the
-public Warp repo. Copy `warp-channel-config.example` to a directory on your
-`PATH` as `warp-channel-config` (drop the suffix, `chmod +x`) and fill in the
-`firebase_auth_api_key` placeholder if your build needs it. **Do not commit
-your real channel config — it contains credentials.**
+The bundle is created at `target/debug/bundle/osx/WarpOss.app` unless Cargo is
+configured to use a different target directory.
 
-Run:
-
-```sh
-./target/debug/warp                # black hole
-WARP_CELESTIAL=sun ./target/debug/warp   # sun
-```
-
-Wire up the statusLine hook in your Claude Code settings:
+To configure Claude Code manually:
 
 ```json
 {
   "statusLine": {
     "type": "command",
-    "command": "/path/to/claude-token.py"
+    "command": "/absolute/path/to/claude-token.py"
+  },
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "/absolute/path/to/claude-token.py"
+      }]
+    }],
+    "SessionEnd": [{
+      "hooks": [{
+        "type": "command",
+        "command": "/absolute/path/to/claude-token.py"
+      }]
+    }]
   }
 }
 ```
 
-## Notes
+Preserve any other keys already present in `~/.claude/settings.json`.
 
-- macOS Metal path only; the patch does not touch other platforms.
-- The patch modifies Warp, which is AGPL-3.0; these changes are meant to be
-  applied to and redistributed with that source under the same terms.
-- The sun's particles are procedural: the post-process pass has no particle
-  buffer, so 32 embers are faked in-shader (hashed launch angle/speed/lifetime,
-  distance-culled per fragment).
+## Troubleshooting
+
+### The installer says the Metal compiler is missing
+
+Install the full Xcode app, open it once, and allow its additional components to
+finish installing. If first-launch setup is incomplete, run:
+
+```bash
+sudo xcodebuild -runFirstLaunch
+```
+
+Then retry `./install.sh --check`.
+
+### The app opens but no effect appears
+
+Run `~/.local/bin/warp-celestial --demo`. If the demo works, restart Claude Code
+so it reloads `statusLine`, then confirm that this file changes during a session:
+
+```bash
+cat ~/.cache/warp/blackhole_context
+```
+
+### Claude Code already has a custom status line
+
+The installer creates a timestamped backup before replacing `statusLine`. It
+preserves existing lifecycle hooks and adds its commands beside them, but it
+does not merge two status-line programs. Use `--skip-claude-config` if you want
+to combine the status lines manually.
+
+### The managed Warp checkout has unexpected changes
+
+The installer refuses to reset or delete modified source. Move
+`~/.local/share/warp-celestial/warp` elsewhere, or remove it after saving any
+work you need, then run the installer again.
+
+## Removing the local installation
+
+After saving anything you need, remove these project-owned paths:
+
+```text
+~/Applications/Warp Celestial.app
+~/.local/bin/warp-celestial
+~/.local/share/warp-celestial
+~/.cache/warp/blackhole_context
+```
+
+Restore the timestamped `~/.claude/settings.json.backup.*` file, or remove the
+`statusLine` entry and the two lifecycle hook commands added by this project.
+
+## Repository contents
+
+| Path | Purpose |
+| --- | --- |
+| `install.sh` | Preflight, build, app installation and safe Claude configuration |
+| `scripts/configure_claude.py` | Atomic, preserving update of Claude Code settings |
+| `patches/celestial-effect.patch` | Complete Warp source patch |
+| `claude-token.py` | Claude Code context-to-renderer bridge |
+| `blackhole.png` | README preview captured from the real patched app |
+| `warp-channel-config.example` | Optional local-development stub; not used by the installer |
+| `src/main.rs` | Historical standalone Metal proof of concept |
+| `PLAN.md` | Original integration plan |
+
+## Limitations and license
+
+- The renderer patch currently supports macOS Metal only.
+- The patch is pinned to Warp commit `69ce3728`; newer Warp revisions may need a
+  rebase.
+- The locally built OSS app is ad-hoc signed, not Apple-notarized.
+- Warp is AGPL-3.0. The patch is intended to be applied to and distributed with
+  Warp under the same license obligations.
