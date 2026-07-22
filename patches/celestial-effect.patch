@@ -1,6 +1,18 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 93bccec37..08944c3d1 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -16098,6 +16098,7 @@ dependencies = [
+  "sum_tree",
+  "takecell",
+  "tauri-winrt-notification",
++ "tempfile",
+  "thiserror 2.0.17",
+  "tini",
+  "url",
 diff --git a/INTEGRATION_SPEC.md b/INTEGRATION_SPEC.md
 new file mode 100644
-index 00000000..a81175fc
+index 000000000..708fe1ab1
 --- /dev/null
 +++ b/INTEGRATION_SPEC.md
 @@ -0,0 +1,68 @@
@@ -11,7 +23,7 @@ index 00000000..a81175fc
 +
 +## 范围
 +- **仅 Metal 后端**：macOS 默认构建路径。wgpu 实验后端暂不改造。
-+- **数据通道第一版采用文件**：`~/.cache/warp/blackhole_context`，避免在渲染线程外寻找 cursor color / agent 内部数据。后续可替换为 cursor-color 或 agent 直接 plumbing。
++- **数据通道采用分会话缓存目录**：`~/.cache/warp/blackhole_contexts/<pane>/<session>.context`，避免并发 Claude 会话互相覆盖。渲染器当前聚合所有 Pane 的最大值；后续完成 UI plumbing 后可按活动 Tab / 焦点 Pane 选择。
 +- **不新增 Cargo 依赖**：纯 MSL + Rust 实现。
 +
 +## 修改文件
@@ -33,7 +45,7 @@ index 00000000..a81175fc
 +
 +## 数据文件格式
 +
-+路径：`~/.cache/warp/blackhole_context`
++路径：`~/.cache/warp/blackhole_contexts/<pane>/<session>.context`
 +内容：单行浮点 `0.0` ~ `1.0`（context 填充率）。文件不存在或解析失败 = `0.0`（黑洞隐藏）。
 +
 +用户侧的 `claude-token.py`（独立脚本，AGPL 外）把 Claude Code 的填充率写进该文件，替代原版的光标颜色 hack。
@@ -42,7 +54,7 @@ index 00000000..a81175fc
 +
 +```
 +每帧 render():
-+  1. 读 ~/.cache/warp/blackhole_context → fill (缓存/节流，避免每帧 open)
++  1. 扫描 ~/.cache/warp/blackhole_contexts → fill 最大值 (缓存/节流，避免每帧 open)
 +  2. 场景 pass：把 Scene(rects/glyphs/images) 渲染到 offscreen_tex（原 drawable 改为 offscreen）
 +  3. 合成 pass：全屏 quad 采样 offscreen_tex → blackhole_fragment → 输出到 drawable
 +  4. present drawable
@@ -72,8 +84,20 @@ index 00000000..a81175fc
 +## 当前阻塞
 +
 +无。Xcode + MetalToolchain 已就绪；repo 已 clone。
+diff --git a/crates/warpui/Cargo.toml b/crates/warpui/Cargo.toml
+index da00e3879..b2b1d9be4 100644
+--- a/crates/warpui/Cargo.toml
++++ b/crates/warpui/Cargo.toml
+@@ -137,6 +137,7 @@ dispatch2 = { workspace = true }
+ 
+ [target.'cfg(target_os = "macos")'.dev-dependencies]
+ rand.workspace = true
++tempfile.workspace = true
+ 
+ [target.'cfg(not(target_family = "wasm"))'.dependencies]
+ async-io.workspace = true
 diff --git a/crates/warpui/build.rs b/crates/warpui/build.rs
-index f9b6a3ed..9622480a 100644
+index f9b6a3ede..9622480a7 100644
 --- a/crates/warpui/build.rs
 +++ b/crates/warpui/build.rs
 @@ -37,6 +37,7 @@ fn bindgen_shader_types() {
@@ -85,15 +109,16 @@ index f9b6a3ed..9622480a 100644
          // Disable intrinsic headers that define types containing 16-bit floats (`_Float16`,
          // `__m512h`, etc.) via preprocessor directive. `bindgen` doesn't know how to process
 diff --git a/crates/warpui/src/platform/mac/rendering/metal/renderer.rs b/crates/warpui/src/platform/mac/rendering/metal/renderer.rs
-index f10adef6..03add99c 100644
+index f10adef61..be0eb641c 100644
 --- a/crates/warpui/src/platform/mac/rendering/metal/renderer.rs
 +++ b/crates/warpui/src/platform/mac/rendering/metal/renderer.rs
 @@ -1,10 +1,11 @@
 -use std::collections::HashMap;
  use std::ffi::c_void;
 -use std::fs::File;
+-use std::io::Write;
 +use std::fs::{self, File};
- use std::io::Write;
++use std::io::{self, ErrorKind, Write};
  use std::mem;
 +use std::path::PathBuf;
  use std::ptr::NonNull;
@@ -264,7 +289,7 @@ index f10adef6..03add99c 100644
 +    start_time: Instant,
 +    last_fill_read: Instant,
 +    cached_fill: f32,
-+    context_file: PathBuf,
++    context_dir: PathBuf,
  }
  
  impl Renderer {
@@ -307,10 +332,10 @@ index f10adef6..03add99c 100644
  
          let glyph_cache = GlyphCache::new(glyph_config);
  
-+        let context_file = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()))
++        let context_dir = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()))
 +            .join(".cache")
 +            .join("warp")
-+            .join("blackhole_context");
++            .join("blackhole_contexts");
 +
          Self {
              resources: Resources {
@@ -331,7 +356,7 @@ index f10adef6..03add99c 100644
 +            start_time: Instant::now(),
 +            last_fill_read: Instant::now() - Duration::from_secs(3600),
 +            cached_fill: 0.0,
-+            context_file,
++            context_dir,
          }
      }
  
@@ -363,7 +388,7 @@ index f10adef6..03add99c 100644
      fn render(
          &mut self,
          scene: &Scene,
-@@ -293,551 +264,137 @@ impl Renderer {
+@@ -293,552 +264,172 @@ impl Renderer {
              .glyph_cache
              .update_config(&scene.rendering_config().glyphs);
  
@@ -664,33 +689,6 @@ index f10adef6..03add99c 100644
 -            self.command_encoder.setVertexBuffer_offset_atIndex(
 -                Some(&self.resources.quad_vertices),
 -                0,
--                0,
--            );
--        }
--
--        for image in &layer.images {
--            self.render_image_or_icon(Some(image), None);
--        }
--
--        // Another iteration for rendering icons.
--        for icon in &layer.icons {
--            self.render_image_or_icon(None, Some(icon));
--        }
--    }
--
--    fn draw_rects(&self, layer: &Layer) {
--        if layer.rects.is_empty() {
--            // It's a mac assertion error to create an empty metal buffer, so exit early
--            return;
--        }
--
--        self.command_encoder
--            .setRenderPipelineState(&self.resources.draw_rects_pipeline_state);
--        // SAFETY: index 0 binds the shared quad vertex buffer, which outlives the draw call.
--        unsafe {
--            self.command_encoder.setVertexBuffer_offset_atIndex(
--                Some(&self.resources.quad_vertices),
--                0,
 +            composite_encoder.setFragmentBytes_length_atIndex(uniforms_ptr, uniforms_len, 0);
 +            composite_encoder.drawPrimitives_vertexStart_vertexCount(
 +                MTLPrimitiveType::Triangle,
@@ -700,6 +698,52 @@ index f10adef6..03add99c 100644
          }
 +        composite_encoder.endEncoding();
  
+-        for image in &layer.images {
+-            self.render_image_or_icon(Some(image), None);
++        if !should_capture && !presents_with_transaction {
++            command_buffer.presentDrawable(ProtocolObject::from_ref(ctx.drawable));
++            command_buffer.commit();
++            return None;
+         }
+ 
+-        // Another iteration for rendering icons.
+-        for icon in &layer.icons {
+-            self.render_image_or_icon(None, Some(icon));
+-        }
++        command_buffer.commit();
++        command_buffer.waitUntilCompleted();
++
++        let capture = if should_capture {
++            capture_frame(&drawable_texture, drawable_size)
++        } else {
++            None
++        };
++
++        ctx.drawable.present();
++        capture
+     }
+ 
+-    fn draw_rects(&self, layer: &Layer) {
+-        if layer.rects.is_empty() {
+-            // It's a mac assertion error to create an empty metal buffer, so exit early
++    fn ensure_offscreen_texture(&mut self, device: &ProtocolObject<dyn MTLDevice>, size: Vector2F) {
++        if self.resources.offscreen_texture_size == size
++            && self.resources.offscreen_texture.is_some()
++        {
+             return;
+         }
+ 
+-        self.command_encoder
+-            .setRenderPipelineState(&self.resources.draw_rects_pipeline_state);
+-        // SAFETY: index 0 binds the shared quad vertex buffer, which outlives the draw call.
+-        unsafe {
+-            self.command_encoder.setVertexBuffer_offset_atIndex(
+-                Some(&self.resources.quad_vertices),
+-                0,
+-                0,
+-            );
+-        }
+-
 -        let mut per_rect_uniforms = Vec::new();
 -        for rect in &layer.rects {
 -            let scale_factor = self.scene.scale_factor();
@@ -769,7 +813,17 @@ index f10adef6..03add99c 100644
 -                scale_factor,
 -                min_dimension,
 -            );
--
++        let width = size.x().round().max(1.0) as usize;
++        let height = size.y().round().max(1.0) as usize;
++        self.resources.offscreen_texture = Some(create_capture_texture(
++            device,
++            width,
++            height,
++            MTLPixelFormat::BGRA8Unorm,
++        ));
++        self.resources.offscreen_texture_size = size;
++    }
+ 
 -            per_rect_uniforms.push(shader::PerRectUniforms::new(
 -                bounds.origin().into(),
 -                bounds.size().into(),
@@ -795,22 +849,19 @@ index f10adef6..03add99c 100644
 -                dash_length,
 -                gap_lengths.into(),
 -            ));
-+        if !should_capture && !presents_with_transaction {
-+            command_buffer.presentDrawable(ProtocolObject::from_ref(ctx.drawable));
-+            command_buffer.commit();
-+            return None;
++    fn read_context_fill(&mut self) -> f32 {
++        if self.last_fill_read.elapsed() < CONTEXT_FILL_TTL {
++            return self.cached_fill;
          }
 -        let per_rect_uniforms_buffer = new_metal_buffer(
 -            self.ctx.device,
 -            &per_rect_uniforms,
 -            MTLResourceOptions::StorageModeManaged,
 -        );
- 
+-
 -        let uniforms = shader::Uniforms::new(self.ctx.drawable_size.into());
 -        let uniforms_ptr = NonNull::from(&uniforms).cast::<c_void>();
 -        let uniforms_len = mem::size_of::<shader::Uniforms>();
-+        command_buffer.commit();
-+        command_buffer.waitUntilCompleted();
  
 -        // SAFETY: the per-rect uniform buffer and `uniforms` value outlive this encoded draw
 -        // call, and the bound buffer/byte sizes and indices match the shader bindings.
@@ -824,12 +875,7 @@ index f10adef6..03add99c 100644
 -                .setVertexBytes_length_atIndex(uniforms_ptr, uniforms_len, 2);
 -            self.command_encoder
 -                .setFragmentBytes_length_atIndex(uniforms_ptr, uniforms_len, 0);
-+        let capture = if should_capture {
-+            capture_frame(&drawable_texture, drawable_size)
-+        } else {
-+            None
-+        };
- 
+-
 -            self.command_encoder
 -                .drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount(
 -                    MTLPrimitiveType::Triangle,
@@ -840,16 +886,30 @@ index f10adef6..03add99c 100644
 -                    per_rect_uniforms.len(),
 -                );
 -        }
-+        ctx.drawable.present();
-+        capture
++        self.cached_fill = match max_context_fill(&self.context_dir) {
++            Ok(fill) => fill,
++            Err(error) => {
++                report_error!("Unable to read celestial context cache: {error}");
++                0.0
++            }
++        };
++        self.last_fill_read = Instant::now();
++        self.cached_fill
      }
++}
  
 -    fn draw_glyphs(&mut self, layer: &Layer) {
 -        if layer.glyphs.is_empty() {
 -            // It's a mac assertion error to create an empty metal buffer, so exit early
 -            return;
 -        }
--
++fn max_context_fill(root: &std::path::Path) -> io::Result<f32> {
++    let pane_directories = match fs::read_dir(root) {
++        Ok(entries) => entries,
++        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(0.0),
++        Err(error) => return Err(error),
++    };
+ 
 -        self.command_encoder
 -            .setRenderPipelineState(&self.resources.draw_glyphs_pipeline_state);
 -        // SAFETY: index 0 binds the shared quad vertex buffer, which outlives the draw calls.
@@ -859,7 +919,12 @@ index f10adef6..03add99c 100644
 -                0,
 -                0,
 -            );
--        }
++    let mut maximum = 0.0_f32;
++    for pane_directory in pane_directories {
++        let pane_directory = pane_directory?;
++        if !pane_directory.file_type()?.is_dir() {
++            continue;
+         }
 -
 -        let scale_factor = self.scene.scale_factor();
 -
@@ -932,19 +997,19 @@ index f10adef6..03add99c 100644
 -                    );
 -                    return;
 -                }
--            }
++        for record in fs::read_dir(pane_directory.path())? {
++            let path = record?.path();
++            if path.extension().and_then(|extension| extension.to_str()) != Some("context") {
++                continue;
+             }
 -        }
--
+ 
 -        if texture_to_glyph.is_empty() {
 -            // Early exit if there are no glyphs to render, as it causes a debug assert
 -            // failure in the metal code to create an empty metal buffer.
-+    fn ensure_offscreen_texture(&mut self, device: &ProtocolObject<dyn MTLDevice>, size: Vector2F) {
-+        if self.resources.offscreen_texture_size == size
-+            && self.resources.offscreen_texture.is_some()
-+        {
-             return;
-         }
- 
+-            return;
+-        }
+-
 -        for (texture_id, per_glyph_uniforms) in texture_to_glyph {
 -            let per_glyph_uniforms_buffer = new_metal_buffer(
 -                self.ctx.device,
@@ -961,17 +1026,7 @@ index f10adef6..03add99c 100644
 -                .glyph_cache
 -                .texture(&texture_id)
 -                .expect("texture ID should be in atlas");
-+        let width = size.x().round().max(1.0) as usize;
-+        let height = size.y().round().max(1.0) as usize;
-+        self.resources.offscreen_texture = Some(create_capture_texture(
-+            device,
-+            width,
-+            height,
-+            MTLPixelFormat::BGRA8Unorm,
-+        ));
-+        self.resources.offscreen_texture_size = size;
-+    }
- 
+-
 -            // SAFETY: the per-glyph uniform buffer, `uniforms` value, bound texture, and quad
 -            // index buffer outlive this encoded draw call, and the bound sizes/indices match the
 -            // shader bindings.
@@ -995,27 +1050,27 @@ index f10adef6..03add99c 100644
 -                        per_glyph_uniforms.len(),
 -                    );
 -            }
-+    fn read_context_fill(&mut self) -> f32 {
-+        if self.last_fill_read.elapsed() < CONTEXT_FILL_TTL {
-+            return self.cached_fill;
++            let contents = fs::read_to_string(&path)?;
++            let fill = contents.trim().parse::<f32>().map_err(|error| {
++                io::Error::new(
++                    ErrorKind::InvalidData,
++                    format!("invalid context record {}: {error}", path.display()),
++                )
++            })?;
++            maximum = maximum.max(fill.clamp(0.0, 1.0));
          }
--    }
+     }
 -}
- 
+-
 -impl Drop for Frame<'_> {
 -    fn drop(&mut self) {
 -        self.resources.texture_cache.end_frame();
-+        self.cached_fill = fs::read_to_string(&self.context_file)
-+            .ok()
-+            .and_then(|contents| contents.trim().parse::<f32>().ok())
-+            .map(|fill| fill.clamp(0.0, 1.0))
-+            .unwrap_or(0.0);
-+        self.last_fill_read = Instant::now();
-+        self.cached_fill
-     }
+-    }
++    Ok(maximum)
  }
  
-@@ -1021,6 +578,16 @@ mod shader {
+ fn new_metal_buffer<T>(
+@@ -1021,6 +612,16 @@ mod shader {
              }
          }
      }
@@ -1032,15 +1087,22 @@ index f10adef6..03add99c 100644
  }
  
  pub(super) struct MetalDrawContext<'a> {
-@@ -1100,57 +667,12 @@ impl super::super::Renderer for Renderer {
+@@ -1100,57 +701,47 @@ impl super::super::Renderer for Renderer {
      }
  
      fn resize(&mut self, _window: &WindowState) {
 -        // TODO(alokedesai): Backport the optimization to only set the size of surface when a
 -        // window is resized to the Metal renderer.
--    }
--}
--
++        // Drop the offscreen texture so it is recreated at the new drawable size next frame.
++        self.resources.offscreen_texture = None;
++        self.resources.offscreen_texture_size = Vector2F::zero();
++    }
++
++    fn blackhole_active(&self) -> bool {
++        self.cached_fill > 0.0
+     }
+ }
+ 
 -/// Writes the bytes of the `glyph` into a region of the current texture identified by `region`.
 -fn insert_glyph_into_texture(
 -    region: AllocatedRegion,
@@ -1059,7 +1121,24 @@ index f10adef6..03add99c 100644
 -            depth: 1,
 -        },
 -    };
--
++#[cfg(test)]
++mod tests {
++    use super::max_context_fill;
++
++    #[test]
++    fn context_fill_uses_maximum_across_panes_and_sessions() {
++        let root = tempfile::tempdir().unwrap();
++        let first_pane = root.path().join("first-pane");
++        let second_pane = root.path().join("second-pane");
++        std::fs::create_dir_all(&first_pane).unwrap();
++        std::fs::create_dir_all(&second_pane).unwrap();
++        std::fs::write(first_pane.join("first.context"), "0.200000\n").unwrap();
++        std::fs::write(first_pane.join("second.context"), "0.800000\n").unwrap();
++        std::fs::write(second_pane.join("third.context"), "0.500000\n").unwrap();
++
++        assert_eq!(max_context_fill(root.path()).unwrap(), 0.8);
++    }
+ 
 -    let bytes_per_row: usize = 4 * (glyph.canvas.size.x() as usize);
 -    // SAFETY: the glyph canvas holds at least `bytes_per_row * region.height` bytes laid out to
 -    // match the destination region.
@@ -1071,9 +1150,10 @@ index f10adef6..03add99c 100644
 -                .expect("glyph canvas pixel pointer is non-null"),
 -            bytes_per_row,
 -        );
-+        // Drop the offscreen texture so it is recreated at the new drawable size next frame.
-+        self.resources.offscreen_texture = None;
-+        self.resources.offscreen_texture_size = Vector2F::zero();
++    #[test]
++    fn missing_context_directory_is_empty_state() {
++        let root = tempfile::tempdir().unwrap();
++        assert_eq!(max_context_fill(&root.path().join("missing")).unwrap(), 0.0);
      }
 -}
  
@@ -1088,8 +1168,14 @@ index f10adef6..03add99c 100644
 -    unsafe {
 -        texture_descriptor.setWidth(atlas_size);
 -        texture_descriptor.setHeight(atlas_size);
-+    fn blackhole_active(&self) -> bool {
-+        self.cached_fill > 0.0
++    #[test]
++    fn malformed_context_record_is_reported() {
++        let root = tempfile::tempdir().unwrap();
++        let pane = root.path().join("pane");
++        std::fs::create_dir_all(&pane).unwrap();
++        std::fs::write(pane.join("bad.context"), "not-a-number\n").unwrap();
++
++        assert!(max_context_fill(root.path()).is_err());
      }
 -    device
 -        .newTextureWithDescriptor(&texture_descriptor)
@@ -1097,7 +1183,7 @@ index f10adef6..03add99c 100644
  }
 diff --git a/crates/warpui/src/platform/mac/rendering/metal/renderer/frame.rs b/crates/warpui/src/platform/mac/rendering/metal/renderer/frame.rs
 new file mode 100644
-index 00000000..42312fb3
+index 000000000..42312fb3f
 --- /dev/null
 +++ b/crates/warpui/src/platform/mac/rendering/metal/renderer/frame.rs
 @@ -0,0 +1,624 @@
@@ -1726,7 +1812,7 @@ index 00000000..42312fb3
 +        .expect("device should create an atlas texture")
 +}
 diff --git a/crates/warpui/src/platform/mac/rendering/metal/shaders/shader_types.h b/crates/warpui/src/platform/mac/rendering/metal/shaders/shader_types.h
-index 4f549d7c..cd36db94 100644
+index 4f549d7c1..cd36db941 100644
 --- a/crates/warpui/src/platform/mac/rendering/metal/shaders/shader_types.h
 +++ b/crates/warpui/src/platform/mac/rendering/metal/shaders/shader_types.h
 @@ -49,4 +49,14 @@ typedef struct {
@@ -1745,7 +1831,7 @@ index 4f549d7c..cd36db94 100644
 +
  #endif // shader_types_h
 diff --git a/crates/warpui/src/platform/mac/rendering/metal/shaders/shaders.metal b/crates/warpui/src/platform/mac/rendering/metal/shaders/shaders.metal
-index 8b3eef7a..8083cb65 100644
+index 8b3eef7ac..ea459b618 100644
 --- a/crates/warpui/src/platform/mac/rendering/metal/shaders/shaders.metal
 +++ b/crates/warpui/src/platform/mac/rendering/metal/shaders/shaders.metal
 @@ -400,3 +400,339 @@ fragment float4 glyph_fragment_shader(
@@ -2089,7 +2175,7 @@ index 8b3eef7a..8083cb65 100644
 +    return float4(mix(original, col, effect_alpha), 1.0);
 +}
 diff --git a/crates/warpui/src/platform/mac/rendering/renderer.rs b/crates/warpui/src/platform/mac/rendering/renderer.rs
-index 5c816511..b64c77b2 100644
+index 5c8165118..b64c77b2d 100644
 --- a/crates/warpui/src/platform/mac/rendering/renderer.rs
 +++ b/crates/warpui/src/platform/mac/rendering/renderer.rs
 @@ -22,6 +22,15 @@ pub trait Renderer {
@@ -2109,7 +2195,7 @@ index 5c816511..b64c77b2 100644
  
  /// Set of available physical graphics devices that can be used to render.
 diff --git a/crates/warpui/src/platform/mac/window.rs b/crates/warpui/src/platform/mac/window.rs
-index ec68a489..e9a0c433 100644
+index ec68a4897..d84185ce6 100644
 --- a/crates/warpui/src/platform/mac/window.rs
 +++ b/crates/warpui/src/platform/mac/window.rs
 @@ -1452,6 +1452,21 @@ extern "C-unwind" fn warp_update_layer(this: &Object) {

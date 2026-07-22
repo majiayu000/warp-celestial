@@ -257,8 +257,10 @@ case "\$effect" in
   blackhole | sun) ;;
   --demo)
     effect="blackhole"
-    mkdir -p "\${HOME}/.cache/warp"
-    printf '0.650000\\n' >"\${HOME}/.cache/warp/blackhole_context"
+    demo_record="\${HOME}/.cache/warp/blackhole_contexts/demo/demo.context"
+    mkdir -p "\$(dirname "\$demo_record")"
+    printf '0.650000\\n' >"\$demo_record"
+    (sleep 30; rm -f "\$demo_record"; rmdir "\$(dirname "\$demo_record")" 2>/dev/null || true) &
     ;;
   *)
     printf 'Usage: warp-celestial [blackhole|sun|--demo]\\n' >&2

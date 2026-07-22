@@ -81,8 +81,8 @@ cd warp-celestial
 ~/.local/bin/warp-celestial --demo
 ```
 
-`--demo` 会向 `~/.cache/warp/blackhole_context` 写入临时的 65% 占用值，
-下一次 Claude Code 状态更新会覆盖它。
+`--demo` 会在 `~/.cache/warp/blackhole_contexts` 下写入临时的 65% 占用记录，
+并在 30 秒后自动删除。
 
 如果 `~/.local/bin` 已加入 `PATH`，可以使用短命令：
 
@@ -102,11 +102,11 @@ Claude Code statusLine JSON
           v
 claude-token.py
           |
-          |  写入 0.0 到 1.0 的数字
+          |  每个 Claude 会话写入一个 0.0 到 1.0 的记录
           v
-~/.cache/warp/blackhole_context
+~/.cache/warp/blackhole_contexts/<pane>/<session>.context
           |
-          |  Warp 最多每 100 ms 读取一次
+          |  Warp 最多每 100 ms 聚合一次最大值
           v
 Warp Metal 渲染器
   1. 把正常终端场景渲染到离屏 BGRA 纹理
@@ -114,6 +114,16 @@ Warp Metal 渲染器
   3. 添加透镜、吸积盘或日冕以及动画
   4. 输出最终合成画面
 ```
+
+### Tab、Pane 与并发会话
+
+每个 Claude 会话会按照继承的 `WARP_TERMINAL_SESSION_UUID` 写入自己的记录。
+结束一个会话只会删除它自己的文件，不会再把其他运行中的会话状态清空。同一个
+Pane 内的多个会话以及不同 Tab 中的会话，目前会取上下文占用的最大值。
+
+Metal 效果目前仍是窗口级的；切换 Tab 或分屏焦点时，还不能只显示焦点 Pane 的
+状态。完整的 Tab 级切换需要把 Warp UI 的活动 Pane ID 传进渲染 Scene。缓存结构
+已经按 Pane 隔离，后续加入这层映射不需要再次迁移数据。
 
 ### 上下文桥接
 
@@ -215,7 +225,7 @@ sudo xcodebuild -runFirstLaunch
 以重新载入 `statusLine`，并在会话中检查该文件是否变化：
 
 ```bash
-cat ~/.cache/warp/blackhole_context
+find ~/.cache/warp/blackhole_contexts -maxdepth 3 -name '*.context' -print -exec cat {} \;
 ```
 
 ### Claude Code 已经配置了自定义状态栏
@@ -237,7 +247,7 @@ cat ~/.cache/warp/blackhole_context
 ~/Applications/Warp Celestial.app
 ~/.local/bin/warp-celestial
 ~/.local/share/warp-celestial
-~/.cache/warp/blackhole_context
+~/.cache/warp/blackhole_contexts
 ```
 
 然后恢复带时间戳的 `~/.claude/settings.json.backup.*`，或者删除本项目加入的

@@ -85,9 +85,8 @@ reports no active context usage. To preview it without waiting for a session:
 ~/.local/bin/warp-celestial --demo
 ```
 
-`--demo` writes a temporary 65% fill value to
-`~/.cache/warp/blackhole_context`. The next Claude Code status update replaces
-that value.
+`--demo` writes a temporary 65% fill record under
+`~/.cache/warp/blackhole_contexts` and removes it after 30 seconds.
 
 If `~/.local/bin` is on your `PATH`, the shorter commands work too:
 
@@ -107,11 +106,11 @@ Claude Code statusLine JSON
           v
 claude-token.py
           |
-          |  writes a number from 0.0 to 1.0
+          |  writes one 0.0-to-1.0 record per Claude session
           v
-~/.cache/warp/blackhole_context
+~/.cache/warp/blackhole_contexts/<pane>/<session>.context
           |
-          |  sampled by Warp, at most once every 100 ms
+          |  maximum sampled by Warp, at most once every 100 ms
           v
 Warp Metal renderer
   1. render the normal scene to an offscreen BGRA texture
@@ -154,12 +153,26 @@ While the fill value is zero, the window uses Warp's normal event-driven redraw
 behavior and the effect is not continuously animated. While it is above zero,
 the window redraws at display rate so the shader can move. The implementation
 reuses the offscreen texture, preserves the cached scene between animation
-frames and reads the context file no more than once every 100 ms.
+frames and scans the small context cache no more than once every 100 ms.
 
 This still costs more GPU time and memory bandwidth than stock Warp because an
 active effect adds a full-screen render pass. Larger windows, Retina resolution
 and high-refresh-rate displays cost more. Close the custom app or end the Claude
 Code session to stop that continuous rendering.
+
+### Tabs, panes and concurrent sessions
+
+Each Claude session writes its own record under the stable Warp terminal pane
+ID inherited through `WARP_TERMINAL_SESSION_UUID`. Ending one session removes
+only that record, so it cannot erase another running session. Multiple sessions
+inside one pane and sessions in different tabs are currently combined by taking
+the highest context usage.
+
+The Metal effect is still window-wide. It does not yet switch to only the
+focused pane when you change tabs or split-pane focus; doing that requires the
+active pane ID to be carried through Warp's UI scene into the renderer. The
+cache layout is already pane-aware so that mapping can be added without another
+data migration.
 
 ## Manual installation
 
@@ -231,7 +244,7 @@ Run `~/.local/bin/warp-celestial --demo`. If the demo works, restart Claude Code
 so it reloads `statusLine`, then confirm that this file changes during a session:
 
 ```bash
-cat ~/.cache/warp/blackhole_context
+find ~/.cache/warp/blackhole_contexts -maxdepth 3 -name '*.context' -print -exec cat {} \;
 ```
 
 ### Claude Code already has a custom status line
@@ -255,7 +268,7 @@ After saving anything you need, remove these project-owned paths:
 ~/Applications/Warp Celestial.app
 ~/.local/bin/warp-celestial
 ~/.local/share/warp-celestial
-~/.cache/warp/blackhole_context
+~/.cache/warp/blackhole_contexts
 ```
 
 Restore the timestamped `~/.claude/settings.json.backup.*` file, or remove the
