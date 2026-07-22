@@ -4,14 +4,21 @@
 Reads Claude Code's status-line JSON from stdin and writes the current context
 window fill ratio (0.0..1.0) to a file that Warp's Metal renderer polls.
 
-Intended to be invoked from Claude Code's `statusLine` hook in
+Intended to be invoked as Claude Code's top-level `statusLine` command in
 `~/.claude/settings.json`:
 
     {
+      "statusLine": {
+        "type": "command",
+        "command": "/path/to/claude-token.py"
+      },
       "hooks": {
-        "statusLine": {
-          "command": ["/path/to/claude-token.py"]
-        }
+        "SessionStart": [{
+          "hooks": [{"type": "command", "command": "/path/to/claude-token.py"}]
+        }],
+        "SessionEnd": [{
+          "hooks": [{"type": "command", "command": "/path/to/claude-token.py"}]
+        }]
       }
     }
 
@@ -23,6 +30,7 @@ line for the terminal.
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 # Cache file path. Override with BLACKHOLE_CONTEXT_FILE if you want it elsewhere.
@@ -54,15 +62,21 @@ def write_fill(level: float) -> None:
     """Write the fill level to the cache file."""
     level = max(0.0, min(1.0, level))
     CONTEXT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CONTEXT_FILE.write_text(f"{level:.6f}\n", encoding="utf-8")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{CONTEXT_FILE.name}.", dir=CONTEXT_FILE.parent
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as temporary_file:
+            temporary_file.write(f"{level:.6f}\n")
+        os.replace(temporary_name, CONTEXT_FILE)
+    except Exception:
+        Path(temporary_name).unlink(missing_ok=True)
+        raise
 
 
 def remove_fill() -> None:
     """Remove the cache file so the blackhole is hidden."""
-    try:
-        CONTEXT_FILE.unlink()
-    except FileNotFoundError:
-        pass
+    CONTEXT_FILE.unlink(missing_ok=True)
 
 
 def status_line(data: dict, level: float) -> str:
