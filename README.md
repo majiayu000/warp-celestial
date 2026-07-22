@@ -2,10 +2,10 @@
 
 [Chinese version](README.zh-CN.md)
 
-Warp Celestial adds an animated black hole or sun to the macOS Metal renderer
-in [Warp](https://github.com/warpdotdev/warp). The effect bends or illuminates
-the terminal scene, and its size follows the current Claude Code context-window
-usage.
+Warp Celestial adds a geodesic-traced black hole or animated sun to the macOS
+Metal renderer in [Warp](https://github.com/warpdotdev/warp). The black hole
+physically lenses terminal content through a Schwarzschild ray integrator, and
+its size follows the focused Claude Code pane's context-window usage.
 
 ![Warp Celestial black hole](blackhole.png)
 
@@ -32,6 +32,9 @@ cd warp-celestial
 
 The first build can take 10-30 minutes. The installer explains each long-running
 step and asks before installing build helpers or changing Claude Code settings.
+To upgrade an existing installation, pull the latest repository changes and run
+`./install.sh` again. The installer migrates the previous managed renderer patch
+in place, so the Warp source does not need to be cloned again.
 
 To check the machine without installing anything:
 
@@ -78,6 +81,13 @@ configuration. Then open `Warp Celestial.app` from `~/Applications`, or use:
 ~/.local/bin/warp-celestial sun
 ```
 
+The optional second argument selects the GPU cost: `low` (24 trace steps),
+`balanced` (36, the default), or `high` (48). For example:
+
+```bash
+~/.local/bin/warp-celestial blackhole low
+```
+
 The default is `blackhole`. The effect is intentionally hidden when Claude Code
 reports no active context usage. To preview it without waiting for a session:
 
@@ -85,9 +95,9 @@ reports no active context usage. To preview it without waiting for a session:
 ~/.local/bin/warp-celestial --demo
 ```
 
-`--demo` writes a temporary 65% fill value to
-`~/.cache/warp/blackhole_context`. The next Claude Code status update replaces
-that value.
+`--demo` launches a separate app process with a fixed 65% context level. It
+does not modify context records and remains active until that app process exits.
+You can combine it with a quality level, for example `--demo low`.
 
 If `~/.local/bin` is on your `PATH`, the shorter commands work too:
 
@@ -107,31 +117,37 @@ Claude Code statusLine JSON
           v
 claude-token.py
           |
-          |  writes a number from 0.0 to 1.0
+          |  stores one record per session, aggregates within this pane
           v
-~/.cache/warp/blackhole_context
+~/.cache/warp/blackhole_contexts/<pane>/<session>.context
           |
-          |  sampled by Warp, at most once every 100 ms
+          |  signed OSC 12 cursor-color signal
           v
-Warp Metal renderer
+focused Warp tab / split pane
+          |
+          v
+Warp Metal renderer (smoothed 0.0-to-1.0 uniform)
   1. render the normal scene to an offscreen BGRA texture
-  2. sample that texture in a full-screen fragment shader
-  3. apply lensing, disk/corona light and animation
+  2. integrate near-field Schwarzschild photon paths per pixel
+  3. apply terminal lensing, repeated disk crossings and relativistic light
   4. present the composited frame
 ```
 
 ### Context bridge
 
 Claude Code sends JSON to its configured `statusLine` command. The standalone
-`claude-token.py` script calculates the fill ratio from `used_percentage`, or
-from total tokens divided by context-window size when needed. It clamps the
-result to `0.0..1.0` and writes it atomically as a short text value understood
-by the renderer.
+`claude-token.py` calculates the fill ratio from `used_percentage`, or from
+total tokens divided by context-window size when needed. It clamps the result
+to `0.0..1.0`, writes the session record atomically, takes the maximum of the
+live sessions in the same pane, and encodes that value into a checksummed OSC
+12 cursor color. Ordinary theme cursor colors cannot accidentally match the
+signature.
 
 The installer registers the same script for Claude Code's `SessionStart` and
-`SessionEnd` hooks. A start resets the value to zero, and an end removes the
-cache file. Missing or invalid data means zero activity; the renderer does not
-invent a value.
+`SessionEnd` hooks. A start creates a zero record; an end removes only that
+session and republishes the remaining pane maximum. With no sessions left, the
+script restores the normal cursor color. The OSC sequence is written directly
+to the inherited terminal instead of polluting the status-line output.
 
 ### Metal renderer
 
@@ -139,27 +155,43 @@ The patch changes only Warp's macOS Metal backend. The normal terminal scene is
 rendered into a reusable offscreen texture. A second full-screen pass samples
 that texture and runs one of two fragment shaders:
 
-- `blackhole_fragment`: gravitational lensing, event horizon, photon ring,
-  Doppler-brightened accretion disk and slow drift
+- `blackhole_fragment`: numerically integrated Schwarzschild geodesics,
+  physically captured rays, multi-image accretion disk, blackbody temperature,
+  Doppler shift/beaming, time dilation and weak-field lensing
 - `sun_fragment`: limb-darkened photosphere, granulation, sunspots, corona and
   procedural embers
 
 Set `WARP_CELESTIAL=sun` before launch to select the sun. Any other value selects
-the black hole. Both effects use the same viewport size, time and context-fill
-uniforms.
+the black hole. The focused pane publishes a zero-sized transparent marker into
+the current scene, so the signal survives cursor blinks and CLI rich input while
+the renderer glides between context updates rather than changing size in one frame.
 
 ### Resource use
 
 While the fill value is zero, the window uses Warp's normal event-driven redraw
 behavior and the effect is not continuously animated. While it is above zero,
 the window redraws at display rate so the shader can move. The implementation
-reuses the offscreen texture, preserves the cached scene between animation
-frames and reads the context file no more than once every 100 ms.
+reuses the offscreen texture and preserves the cached scene between animation
+frames. Warp performs no filesystem scan: the pane-local value arrives in the
+scene it already renders.
 
-This still costs more GPU time and memory bandwidth than stock Warp because an
-active effect adds a full-screen render pass. Larger windows, Retina resolution
-and high-refresh-rate displays cost more. Close the custom app or end the Claude
-Code session to stop that continuous rendering.
+This costs more GPU time and memory bandwidth than stock Warp because an active
+effect adds a full-screen pass, and pixels near the hole integrate 24-48 ray
+steps. Pixels in the protected bottom work area exit early; distant pixels use
+a cheaper analytic approximation. Larger Retina windows and high-refresh-rate
+displays cost more. Use `low` on a laptop or `high` for recordings; close the
+custom app or end the focused Claude session to stop continuous rendering.
+
+### Tabs, panes and concurrent sessions
+
+Each Claude session writes its own record under the stable Warp terminal pane
+ID inherited through `WARP_TERMINAL_SESSION_UUID`. Multiple Claude sessions in
+one pane aggregate by maximum, so ending one cannot erase another. Different
+tabs and split panes publish independent cursor signals. Warp renders only the
+active tab, and only the focused split publishes an invisible scene marker, so
+changing tab or split focus changes the window-wide effect to that pane's level.
+An active pane with no Claude signal fades the effect out after the short signal
+grace period.
 
 ## Manual installation
 
@@ -231,7 +263,7 @@ Run `~/.local/bin/warp-celestial --demo`. If the demo works, restart Claude Code
 so it reloads `statusLine`, then confirm that this file changes during a session:
 
 ```bash
-cat ~/.cache/warp/blackhole_context
+find ~/.cache/warp/blackhole_contexts -maxdepth 3 -name '*.context' -print -exec cat {} \;
 ```
 
 ### Claude Code already has a custom status line
@@ -255,7 +287,7 @@ After saving anything you need, remove these project-owned paths:
 ~/Applications/Warp Celestial.app
 ~/.local/bin/warp-celestial
 ~/.local/share/warp-celestial
-~/.cache/warp/blackhole_context
+~/.cache/warp/blackhole_contexts
 ```
 
 Restore the timestamped `~/.claude/settings.json.backup.*` file, or remove the
@@ -269,6 +301,7 @@ Restore the timestamped `~/.claude/settings.json.backup.*` file, or remove the
 | `scripts/configure_claude.py` | Atomic, preserving update of Claude Code settings |
 | `patches/celestial-effect.patch` | Complete Warp source patch |
 | `claude-token.py` | Claude Code context-to-renderer bridge |
+| `THIRD_PARTY_NOTICES.md` | Attribution and MIT notice for adapted work |
 | `blackhole.png` | README preview captured from the real patched app |
 | `warp-channel-config.example` | Optional local-development stub; not used by the installer |
 | `src/main.rs` | Historical standalone Metal proof of concept |
@@ -282,3 +315,5 @@ Restore the timestamped `~/.claude/settings.json.backup.*` file, or remove the
 - The locally built OSS app is ad-hoc signed, not Apple-notarized.
 - Warp is AGPL-3.0. The patch is intended to be applied to and distributed with
   Warp under the same license obligations.
+- The geodesic renderer and cursor-channel protocol retain the upstream MIT
+  attribution documented in `THIRD_PARTY_NOTICES.md`.

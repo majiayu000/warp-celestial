@@ -1,107 +1,79 @@
-diff --git a/app/src/terminal/alt_screen/alt_screen_element.rs b/app/src/terminal/alt_screen/alt_screen_element.rs
-index baa82cba1..65f525f55 100644
---- a/app/src/terminal/alt_screen/alt_screen_element.rs
-+++ b/app/src/terminal/alt_screen/alt_screen_element.rs
-@@ -682,6 +682,11 @@ impl Element for AltScreenElement {
- 
-         let override_colors = model.override_colors();
- 
-+        super::super::cursor_signal::publish_focused_pane_signal(
-+            &override_colors,
-+            self.pane_state.is_focused(),
-+            ctx,
-+        );
-         let grid = model.alt_screen().grid_handler();
- 
-         let cell_size = Vector2F::new(
-diff --git a/app/src/terminal/block_list_element.rs b/app/src/terminal/block_list_element.rs
-index 6c92e72ca..e2a398136 100644
---- a/app/src/terminal/block_list_element.rs
-+++ b/app/src/terminal/block_list_element.rs
-@@ -3738,6 +3738,11 @@ impl Element for BlockListElement {
-             override_colors: model.override_colors(),
-             bounds: self.bounds.expect("Must be known at paint time"),
-         };
-+        super::cursor_signal::publish_focused_pane_signal(
-+            &block_grid_params.override_colors,
-+            self.pane_state.is_focused(),
-+            ctx,
-+        );
- 
-         // Determine which of the visible blocks are selected.
-         // Note that we have to be careful with the range boundaries since
-diff --git a/app/src/terminal/cursor_signal.rs b/app/src/terminal/cursor_signal.rs
+diff --git a/INTEGRATION_SPEC.md b/INTEGRATION_SPEC.md
 new file mode 100644
-index 000000000..45ada9b35
+index 00000000..a81175fc
 --- /dev/null
-+++ b/app/src/terminal/cursor_signal.rs
-@@ -0,0 +1,52 @@
-+use warpui::color::ColorU;
-+use warpui::geometry::rect::RectF;
-+use warpui::geometry::vector::Vector2F;
-+use warpui::PaintContext;
++++ b/INTEGRATION_SPEC.md
+@@ -0,0 +1,68 @@
++# Warp 黑洞集成 Spec
 +
-+use super::color::OverrideList;
-+use super::model::ansi::color_index;
++## 目标
++在 Warp（macOS Metal 后端）实现类似 ghostty-blackhole 的效果：终端内容被黑洞引力透镜扭曲，黑洞大小/活跃程度反映 Claude Code context window 填充率。
 +
-+fn signal_color(override_colors: &OverrideList, pane_is_focused: bool) -> Option<ColorU> {
-+    if !pane_is_focused {
-+        return None;
-+    }
++## 范围
++- **仅 Metal 后端**：macOS 默认构建路径。wgpu 实验后端暂不改造。
++- **数据通道第一版采用文件**：`~/.cache/warp/blackhole_context`，避免在渲染线程外寻找 cursor color / agent 内部数据。后续可替换为 cursor-color 或 agent 直接 plumbing。
++- **不新增 Cargo 依赖**：纯 MSL + Rust 实现。
 +
-+    override_colors[color_index::CURSOR].map(|color| ColorU::new(color.r, color.g, color.b, 0))
-+}
++## 修改文件
 +
-+/// Publish an invisible, focused-pane marker that the window renderer can decode.
-+///
-+/// The zero-sized, transparent marker remains present when Warp hides the terminal
-+/// cursor for CLI rich input and cannot be confused with an unfocused split's cursor.
-+pub fn publish_focused_pane_signal(
-+    override_colors: &OverrideList,
-+    pane_is_focused: bool,
-+    ctx: &mut PaintContext,
-+) {
-+    let Some(color) = signal_color(override_colors, pane_is_focused) else {
-+        return;
-+    };
++| # | 文件 | 改动 |
++|---|---|---|
++| 1 | `crates/warpui/src/platform/mac/rendering/metal/shaders/shader_types.h` | 新增 `BlackholeUniforms`（viewport_size/fill/time/padding） |
++| 2 | `crates/warpui/src/platform/mac/rendering/metal/shaders/shaders.metal` | 新增 fullscreen vertex + `blackhole_fragment`：事件视界阴影、光子环、吸积盘、引力透镜 |
++| 3 | `crates/warpui/src/platform/mac/rendering/metal/renderer.rs` | 场景 pass 改写到离屏纹理；新增合成 pass 采样离屏纹理跑黑洞 shader；从文件读 `fill` 并传 uniform |
++| 4 | `crates/warpui/src/platform/mac/rendering/metal/frame_capture.rs` | 现有 `create_capture_texture()` 可直接复用为离屏纹理 |
 +
-+    ctx.scene
-+        .draw_rect_without_hit_recording(RectF::new(Vector2F::zero(), Vector2F::zero()))
-+        .with_background(color);
-+}
++## 关键格式约定（已验证）
 +
-+#[cfg(test)]
-+mod tests {
-+    use super::*;
++来自 PoC 实测：
++- 离屏纹理：`MTLPixelFormat::BGRA8Unorm`，usage `RenderTarget | ShaderRead`，storage `Shared`（Apple Silicon）或 `Private`+blit
++- 场景 pipeline 保持 alpha blend，合成 pipeline **blend 必须关闭**
++- UV 约定：**y-down**，`uv=(p.x, 1.0 - p.y)`，其中 p 来自全屏三角形 `p=(0,0)/(2,0)/(0,2)`
++- 合成 pass 必须 `StoreAction::Store`，否则采样不到
 +
-+    #[test]
-+    fn signal_is_transparent_and_limited_to_the_focused_pane() {
-+        let signed_color = ColorU::new(0xF1, 0xBC, 0x08, 255);
-+        let mut override_colors = OverrideList::empty();
-+        override_colors[color_index::CURSOR] = Some(signed_color);
++## 数据文件格式
 +
-+        assert_eq!(signal_color(&override_colors, false), None);
-+        assert_eq!(
-+            signal_color(&override_colors, true),
-+            Some(ColorU::new(0xF1, 0xBC, 0x08, 0))
-+        );
-+        assert_eq!(signal_color(&OverrideList::empty(), true), None);
-+    }
-+}
-diff --git a/app/src/terminal/mod.rs b/app/src/terminal/mod.rs
-index 78f063bde..47fda496c 100644
---- a/app/src/terminal/mod.rs
-+++ b/app/src/terminal/mod.rs
-@@ -35,6 +35,7 @@ mod buy_credits_banner;
- pub mod color;
- mod command_corrections_denylist;
- pub mod conversation_restoration;
-+mod cursor_signal;
- pub mod dynamic_enum_suggestions;
- pub mod enable_auto_reload_modal;
- pub mod event;
++路径：`~/.cache/warp/blackhole_context`
++内容：单行浮点 `0.0` ~ `1.0`（context 填充率）。文件不存在或解析失败 = `0.0`（黑洞隐藏）。
++
++用户侧的 `claude-token.py`（独立脚本，AGPL 外）把 Claude Code 的填充率写进该文件，替代原版的光标颜色 hack。
++
++## 渲染流程
++
++```
++每帧 render():
++  1. 读 ~/.cache/warp/blackhole_context → fill (缓存/节流，避免每帧 open)
++  2. 场景 pass：把 Scene(rects/glyphs/images) 渲染到 offscreen_tex（原 drawable 改为 offscreen）
++  3. 合成 pass：全屏 quad 采样 offscreen_tex → blackhole_fragment → 输出到 drawable
++  4. present drawable
++```
++
++## 风险与回退
++
++- **性能**：两-pass + 文件读。文件读可用 `mio`/`notify` 或 100ms TTL 缓存；第一版先做简单缓存。
++- **格式错配**：已用 PoC 验证 BGRA8 / blend-off / flip-Y。
++- **无数据时**：fill=0，shader 中黑洞可完全淡出（仅保留微弱阴影或不可见），不影响正常使用。
++- **AGPL**：Warp 本体改动需 AGPL；helper 脚本独立。
++
++## 验证计划
++
++1. `cargo check -p warpui` 通过
++2. `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer cargo build -p warpui` 通过（调用 `xcrun metal`）
++3. 运行 Warp，写入 `0.5` 到数据文件，确认窗口出现黑洞且终端文字被透镜
++4. 写入 `0.0`，确认黑洞淡出/消失
++5. 删除文件，确认无异常
++
++## 后续可选增强
++
++- 把数据通道从文件换成 cursor-color 或 Warp agent 内部数据
++- 移植 ghostty 原版 GLSL 的完整 Schwarzschild 光线追踪
++- 支持 wgpu 后端
++
++## 当前阻塞
++
++无。Xcode + MetalToolchain 已就绪；repo 已 clone。
 diff --git a/crates/warpui/build.rs b/crates/warpui/build.rs
-index f9b6a3ede..268ffcf70 100644
+index f9b6a3ed..9622480a 100644
 --- a/crates/warpui/build.rs
 +++ b/crates/warpui/build.rs
 @@ -37,6 +37,7 @@ fn bindgen_shader_types() {
@@ -112,38 +84,25 @@ index f9b6a3ede..268ffcf70 100644
          .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
          // Disable intrinsic headers that define types containing 16-bit floats (`_Float16`,
          // `__m512h`, etc.) via preprocessor directive. `bindgen` doesn't know how to process
-@@ -71,6 +72,7 @@ fn bindgen_shader_types() {
- fn compile_metal_shaders() {
-     let header_path = "src/platform/mac/rendering/metal/shaders/shader_types.h";
-     let metal_path = "src/platform/mac/rendering/metal/shaders/shaders.metal";
-+    let blackhole_path = "src/platform/mac/rendering/metal/shaders/celestial_blackhole.metal";
-     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
- 
-     let air_path = out_path.join("shaders.air");
-@@ -81,6 +83,7 @@ fn compile_metal_shaders() {
- 
-     println!("cargo:rerun-if-changed={header_path}");
-     println!("cargo:rerun-if-changed={metal_path}");
-+    println!("cargo:rerun-if-changed={blackhole_path}");
-     println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
- 
-     // Pin the AIR bytecode target to `MACOSX_DEPLOYMENT_TARGET`. Without an
 diff --git a/crates/warpui/src/platform/mac/rendering/metal/renderer.rs b/crates/warpui/src/platform/mac/rendering/metal/renderer.rs
-index f10adef61..66a210c4a 100644
+index f10adef6..03add99c 100644
 --- a/crates/warpui/src/platform/mac/rendering/metal/renderer.rs
 +++ b/crates/warpui/src/platform/mac/rendering/metal/renderer.rs
-@@ -1,4 +1,3 @@
+@@ -1,10 +1,11 @@
 -use std::collections::HashMap;
  use std::ffi::c_void;
- use std::fs::File;
+-use std::fs::File;
++use std::fs::{self, File};
  use std::io::Write;
-@@ -7,144 +6,52 @@ use std::ptr::NonNull;
+ use std::mem;
++use std::path::PathBuf;
+ use std::ptr::NonNull;
  use std::sync::Once;
++use std::time::{Duration, Instant};
  
  use dispatch2::DispatchData;
-+use instant::Instant;
  use objc2::rc::Retained;
- use objc2::runtime::ProtocolObject;
+@@ -12,139 +13,44 @@ use objc2::runtime::ProtocolObject;
  use objc2_foundation::NSString;
  use objc2_metal::{
      MTLBlendFactor, MTLBlendOperation, MTLBuffer, MTLClearColor, MTLCommandBuffer,
@@ -178,9 +137,11 @@ index f10adef61..66a210c4a 100644
 -use crate::rendering::atlas::{AllocatedRegion, TextureId};
 -use crate::rendering::{get_best_dash_gap, GlyphCache, GlyphRasterBoundsFn, RasterizeGlyphFn};
 +use crate::rendering::{GlyphCache, GlyphRasterBoundsFn, RasterizeGlyphFn};
++
++mod frame;
  
--const METAL_LIB_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/shaders.metallib"));
--static WRITE_LIB_TO_FILE: Once = Once::new();
+ const METAL_LIB_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/shaders.metallib"));
+ static WRITE_LIB_TO_FILE: Once = Once::new();
 -
 -/// A structure to help manage a single rendering pass.
 -struct RenderPass<'a> {
@@ -189,9 +150,7 @@ index f10adef61..66a210c4a 100644
 -    encoder: Retained<ProtocolObject<dyn MTLRenderCommandEncoder>>,
 -    encoding_finished: bool,
 -}
-+mod celestial;
-+mod frame;
- 
+-
 -impl<'a> RenderPass<'a> {
 -    fn new(
 -        command_queue: &ProtocolObject<dyn MTLCommandQueue>,
@@ -210,8 +169,7 @@ index f10adef61..66a210c4a 100644
 -            encoding_finished: false,
 -        }
 -    }
-+use self::celestial::{parse_demo_fill, CelestialQuality, CelestialState};
- 
+-
 -    /// Finishes a render pass with optional frame capture.
 -    ///
 -    /// If this is not called, the encoded commands will not be executed and the
@@ -282,8 +240,7 @@ index f10adef61..66a210c4a 100644
 -        }
 -    }
 -}
-+const METAL_LIB_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/shaders.metallib"));
-+static WRITE_LIB_TO_FILE: Once = Once::new();
++const CONTEXT_FILL_TTL: Duration = Duration::from_millis(100);
  
  /// A set of resources necessary for rendering that retain state across frames.
  struct Resources {
@@ -300,18 +257,18 @@ index f10adef61..66a210c4a 100644
  }
  
  /// A structure that manages rendering scenes using a particular hardware
-@@ -152,6 +59,10 @@ struct Resources {
+@@ -152,6 +58,10 @@ struct Resources {
  pub struct Renderer {
      resources: Resources,
      command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
 +    start_time: Instant,
-+    celestial: CelestialState,
-+    celestial_trace_steps: u32,
-+    celestial_demo_fill: Option<f32>,
++    last_fill_read: Instant,
++    cached_fill: f32,
++    context_file: PathBuf,
  }
  
  impl Renderer {
-@@ -222,6 +133,34 @@ impl Renderer {
+@@ -222,6 +132,34 @@ impl Renderer {
              .newRenderPipelineStateWithDescriptor_error(&glyph_pipeline)
              .unwrap();
  
@@ -346,31 +303,14 @@ index f10adef61..66a210c4a 100644
          let quad_vertices = new_metal_buffer(
              device,
              &[
-@@ -241,19 +180,48 @@ impl Renderer {
+@@ -241,19 +179,31 @@ impl Renderer {
  
          let glyph_cache = GlyphCache::new(glyph_config);
  
-+        let quality_name =
-+            std::env::var("WARP_CELESTIAL_QUALITY").unwrap_or_else(|_| "balanced".to_string());
-+        let celestial_quality = CelestialQuality::from_name(&quality_name).unwrap_or_else(|| {
-+            report_error!(
-+                "Invalid WARP_CELESTIAL_QUALITY={quality_name:?}; expected low, balanced, or high"
-+            );
-+            CelestialQuality::Balanced
-+        });
-+        let demo_value = match std::env::var("WARP_CELESTIAL_DEMO") {
-+            Ok(value) => Some(value),
-+            Err(std::env::VarError::NotPresent) => None,
-+            Err(std::env::VarError::NotUnicode(_)) => {
-+                report_error!("WARP_CELESTIAL_DEMO must be valid UTF-8");
-+                None
-+            }
-+        };
-+        let celestial_demo_fill = parse_demo_fill(demo_value.as_deref()).unwrap_or_else(|error| {
-+            report_error!("{error}");
-+            None
-+        });
-+        let now = Instant::now();
++        let context_file = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()))
++            .join(".cache")
++            .join("warp")
++            .join("blackhole_context");
 +
          Self {
              resources: Resources {
@@ -388,14 +328,14 @@ index f10adef61..66a210c4a 100644
              command_queue: device
                  .newCommandQueue()
                  .expect("device should always vend a command queue"),
-+            start_time: now,
-+            celestial: CelestialState::new(now),
-+            celestial_trace_steps: celestial_quality.trace_steps(),
-+            celestial_demo_fill,
++            start_time: Instant::now(),
++            last_fill_read: Instant::now() - Duration::from_secs(3600),
++            cached_fill: 0.0,
++            context_file,
          }
      }
  
-@@ -282,6 +250,27 @@ impl Renderer {
+@@ -282,6 +232,27 @@ impl Renderer {
          pipeline
      }
  
@@ -423,7 +363,7 @@ index f10adef61..66a210c4a 100644
      fn render(
          &mut self,
          scene: &Scene,
-@@ -293,551 +282,125 @@ impl Renderer {
+@@ -293,551 +264,137 @@ impl Renderer {
              .glyph_cache
              .update_config(&scene.rendering_config().glyphs);
  
@@ -432,9 +372,7 @@ index f10adef61..66a210c4a 100644
 -        Frame::new(scene, &render_pass.encoder, &mut self.resources, ctx).draw();
 +        let drawable_size = ctx.drawable_size;
 +        self.ensure_offscreen_texture(ctx.device, drawable_size);
-+        let fill = self
-+            .celestial_demo_fill
-+            .unwrap_or_else(|| self.celestial.update(scene, Instant::now()));
++        let fill = self.read_context_fill();
 +        let time = self.start_time.elapsed().as_secs_f32();
  
 -        render_pass.finish_with_capture(
@@ -463,7 +401,7 @@ index f10adef61..66a210c4a 100644
 +        let scene_color_attachment =
 +            // SAFETY: index 0 is always a valid color attachment slot.
 +            unsafe { scene_pass_descriptor.colorAttachments().objectAtIndexedSubscript(0) };
-+        scene_color_attachment.setTexture(self.resources.offscreen_texture.as_deref());
++        scene_color_attachment.setTexture(self.resources.offscreen_texture.as_ref().map(|v| &**v));
 +        scene_color_attachment.setLoadAction(MTLLoadAction::Clear);
 +        scene_color_attachment.setStoreAction(MTLStoreAction::Store);
 +        scene_color_attachment.setClearColor(MTLClearColor {
@@ -594,12 +532,7 @@ index f10adef61..66a210c4a 100644
 -            ui_corner_radius,
 -            scale_factor,
 -            min_dimension,
-+        let uniforms = shader::EffectUniforms::new(
-+            drawable_size.into(),
-+            fill,
-+            time,
-+            self.celestial_trace_steps,
-         );
+-        );
 -        per_rect_uniforms.push(shader::PerRectUniforms::new(
 -            bounds.origin().into(),
 -            bounds.size().into(),
@@ -632,6 +565,7 @@ index f10adef61..66a210c4a 100644
 -        );
 -
 -        let uniforms = shader::Uniforms::new(self.ctx.drawable_size.into());
++        let uniforms = shader::EffectUniforms::new(drawable_size.into(), fill, time);
          let uniforms_ptr = NonNull::from(&uniforms).cast::<c_void>();
 -        let uniforms_len = mem::size_of::<shader::Uniforms>();
 +        let uniforms_len = mem::size_of::<shader::EffectUniforms>();
@@ -642,14 +576,13 @@ index f10adef61..66a210c4a 100644
          unsafe {
 -            self.command_encoder.setVertexBuffer_offset_atIndex(
 -                Some(&per_rect_uniforms_buffer),
-+            composite_encoder
-+                .setFragmentTexture_atIndex(self.resources.offscreen_texture.as_deref(), 0);
-+            composite_encoder.setFragmentBytes_length_atIndex(uniforms_ptr, uniforms_len, 0);
-+            composite_encoder.drawPrimitives_vertexStart_vertexCount(
-+                MTLPrimitiveType::Triangle,
++            composite_encoder.setFragmentTexture_atIndex(
++                self.resources
++                    .offscreen_texture
++                    .as_ref()
++                    .map(|texture| &**texture),
                  0,
 -                1,
-+                3,
              );
 -            self.command_encoder
 -                .setVertexBytes_length_atIndex(uniforms_ptr, uniforms_len, 2);
@@ -715,10 +648,9 @@ index f10adef61..66a210c4a 100644
 -                    0,
 -                    per_rect_uniforms.len(),
 -                );
-         }
+-        }
 -    }
-+        composite_encoder.endEncoding();
- 
+-
 -    fn draw_images(&mut self, layer: &Layer) {
 -        if layer.images.is_empty() && layer.icons.is_empty() {
 -            // It's a mac assertion error to create an empty metal buffer, so exit early
@@ -759,10 +691,15 @@ index f10adef61..66a210c4a 100644
 -            self.command_encoder.setVertexBuffer_offset_atIndex(
 -                Some(&self.resources.quad_vertices),
 -                0,
--                0,
--            );
--        }
--
++            composite_encoder.setFragmentBytes_length_atIndex(uniforms_ptr, uniforms_len, 0);
++            composite_encoder.drawPrimitives_vertexStart_vertexCount(
++                MTLPrimitiveType::Triangle,
+                 0,
++                3,
+             );
+         }
++        composite_encoder.endEncoding();
+ 
 -        let mut per_rect_uniforms = Vec::new();
 -        for rect in &layer.rects {
 -            let scale_factor = self.scene.scale_factor();
@@ -1024,7 +961,17 @@ index f10adef61..66a210c4a 100644
 -                .glyph_cache
 -                .texture(&texture_id)
 -                .expect("texture ID should be in atlas");
--
++        let width = size.x().round().max(1.0) as usize;
++        let height = size.y().round().max(1.0) as usize;
++        self.resources.offscreen_texture = Some(create_capture_texture(
++            device,
++            width,
++            height,
++            MTLPixelFormat::BGRA8Unorm,
++        ));
++        self.resources.offscreen_texture_size = size;
++    }
+ 
 -            // SAFETY: the per-glyph uniform buffer, `uniforms` value, bound texture, and quad
 -            // index buffer outlive this encoded draw call, and the bound sizes/indices match the
 -            // shader bindings.
@@ -1048,55 +995,52 @@ index f10adef61..66a210c4a 100644
 -                        per_glyph_uniforms.len(),
 -                    );
 -            }
--        }
++    fn read_context_fill(&mut self) -> f32 {
++        if self.last_fill_read.elapsed() < CONTEXT_FILL_TTL {
++            return self.cached_fill;
+         }
 -    }
 -}
--
+ 
 -impl Drop for Frame<'_> {
 -    fn drop(&mut self) {
 -        self.resources.texture_cache.end_frame();
-+        let width = size.x().round().max(1.0) as usize;
-+        let height = size.y().round().max(1.0) as usize;
-+        self.resources.offscreen_texture = Some(create_capture_texture(
-+            device,
-+            width,
-+            height,
-+            MTLPixelFormat::BGRA8Unorm,
-+        ));
-+        self.resources.offscreen_texture_size = size;
++        self.cached_fill = fs::read_to_string(&self.context_file)
++            .ok()
++            .and_then(|contents| contents.trim().parse::<f32>().ok())
++            .map(|fill| fill.clamp(0.0, 1.0))
++            .unwrap_or(0.0);
++        self.last_fill_read = Instant::now();
++        self.cached_fill
      }
  }
  
-@@ -1021,6 +584,17 @@ mod shader {
+@@ -1021,6 +578,16 @@ mod shader {
              }
          }
      }
 +
 +    impl EffectUniforms {
-+        pub fn new(viewport_size: Vector2F, fill: f32, time: f32, trace_steps: u32) -> Self {
++        pub fn new(viewport_size: Vector2F, fill: f32, time: f32) -> Self {
 +            Self {
 +                viewport_size: viewport_size.0,
 +                fill,
 +                time,
-+                trace_steps,
 +            }
 +        }
 +    }
  }
  
  pub(super) struct MetalDrawContext<'a> {
-@@ -1100,57 +674,12 @@ impl super::super::Renderer for Renderer {
+@@ -1100,57 +667,12 @@ impl super::super::Renderer for Renderer {
      }
  
      fn resize(&mut self, _window: &WindowState) {
 -        // TODO(alokedesai): Backport the optimization to only set the size of surface when a
 -        // window is resized to the Metal renderer.
-+        // Drop the offscreen texture so it is recreated at the new drawable size next frame.
-+        self.resources.offscreen_texture = None;
-+        self.resources.offscreen_texture_size = Vector2F::zero();
-     }
+-    }
 -}
- 
+-
 -/// Writes the bytes of the `glyph` into a region of the current texture identified by `region`.
 -fn insert_glyph_into_texture(
 -    region: AllocatedRegion,
@@ -1127,9 +1071,12 @@ index f10adef61..66a210c4a 100644
 -                .expect("glyph canvas pixel pointer is non-null"),
 -            bytes_per_row,
 -        );
--    }
++        // Drop the offscreen texture so it is recreated at the new drawable size next frame.
++        self.resources.offscreen_texture = None;
++        self.resources.offscreen_texture_size = Vector2F::zero();
+     }
 -}
--
+ 
 -/// Creates a new texture atlas for use in the cache.
 -fn create_new_texture_atlas(
 -    atlas_size: usize,
@@ -1142,231 +1089,15 @@ index f10adef61..66a210c4a 100644
 -        texture_descriptor.setWidth(atlas_size);
 -        texture_descriptor.setHeight(atlas_size);
 +    fn blackhole_active(&self) -> bool {
-+        self.celestial_demo_fill.is_some() || self.celestial.is_active()
++        self.cached_fill > 0.0
      }
 -    device
 -        .newTextureWithDescriptor(&texture_descriptor)
 -        .expect("device should create an atlas texture")
  }
-diff --git a/crates/warpui/src/platform/mac/rendering/metal/renderer/celestial.rs b/crates/warpui/src/platform/mac/rendering/metal/renderer/celestial.rs
-new file mode 100644
-index 000000000..44acc1d1c
---- /dev/null
-+++ b/crates/warpui/src/platform/mac/rendering/metal/renderer/celestial.rs
-@@ -0,0 +1,107 @@
-+use std::time::Duration;
-+
-+use instant::Instant;
-+use warpui_core::scene::Scene;
-+
-+const SIGNAL_GRACE: Duration = Duration::from_millis(900);
-+const GLIDE_MIN_SECONDS: f32 = 0.3;
-+const GLIDE_MAX_SECONDS: f32 = 1.5;
-+const GLIDE_SECONDS_PER_LEVEL: f32 = 10.0;
-+const SETTLED_EPSILON: f32 = 0.0005;
-+
-+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-+pub(super) enum CelestialQuality {
-+    Low,
-+    Balanced,
-+    High,
-+}
-+
-+impl CelestialQuality {
-+    pub(super) fn from_name(name: &str) -> Option<Self> {
-+        match name {
-+            "low" => Some(Self::Low),
-+            "balanced" => Some(Self::Balanced),
-+            "high" => Some(Self::High),
-+            _ => None,
-+        }
-+    }
-+
-+    pub(super) fn trace_steps(self) -> u32 {
-+        match self {
-+            Self::Low => 24,
-+            Self::Balanced => 36,
-+            Self::High => 48,
-+        }
-+    }
-+}
-+
-+pub(super) fn parse_demo_fill(value: Option<&str>) -> Result<Option<f32>, String> {
-+    let Some(value) = value else {
-+        return Ok(None);
-+    };
-+    let fill = value
-+        .parse::<f32>()
-+        .map_err(|error| format!("Invalid WARP_CELESTIAL_DEMO={value:?}: {error}"))?;
-+    if !fill.is_finite() || !(0.0..=1.0).contains(&fill) {
-+        return Err(format!(
-+            "Invalid WARP_CELESTIAL_DEMO={value:?}; expected a number from 0 to 1"
-+        ));
-+    }
-+    Ok(Some(fill))
-+}
-+
-+pub(super) struct CelestialState {
-+    current_fill: f32,
-+    target_fill: f32,
-+    last_signal: Option<Instant>,
-+    last_update: Instant,
-+}
-+
-+impl CelestialState {
-+    pub(super) fn new(now: Instant) -> Self {
-+        Self {
-+            current_fill: 0.0,
-+            target_fill: 0.0,
-+            last_signal: None,
-+            last_update: now,
-+        }
-+    }
-+
-+    pub(super) fn update(&mut self, scene: &Scene, now: Instant) -> f32 {
-+        if let Some(fill) = scene.signed_cursor_fill() {
-+            self.target_fill = fill.clamp(0.0, 1.0);
-+            self.last_signal = Some(now);
-+        } else if self
-+            .last_signal
-+            .is_none_or(|last_signal| now.saturating_duration_since(last_signal) > SIGNAL_GRACE)
-+        {
-+            self.target_fill = 0.0;
-+        }
-+
-+        let elapsed = now
-+            .saturating_duration_since(self.last_update)
-+            .as_secs_f32()
-+            .min(0.1);
-+        self.last_update = now;
-+
-+        let distance = (self.target_fill - self.current_fill).abs();
-+        if distance <= SETTLED_EPSILON {
-+            self.current_fill = self.target_fill;
-+            return self.current_fill;
-+        }
-+
-+        let glide_seconds =
-+            (distance * GLIDE_SECONDS_PER_LEVEL).clamp(GLIDE_MIN_SECONDS, GLIDE_MAX_SECONDS);
-+        let blend = 1.0 - (-4.6 * elapsed / glide_seconds).exp();
-+        self.current_fill += (self.target_fill - self.current_fill) * blend;
-+        self.current_fill.clamp(0.0, 1.0)
-+    }
-+
-+    pub(super) fn is_active(&self) -> bool {
-+        self.current_fill > SETTLED_EPSILON || self.target_fill > SETTLED_EPSILON
-+    }
-+}
-+
-+#[cfg(test)]
-+#[path = "celestial_tests.rs"]
-+mod tests;
-diff --git a/crates/warpui/src/platform/mac/rendering/metal/renderer/celestial_tests.rs b/crates/warpui/src/platform/mac/rendering/metal/renderer/celestial_tests.rs
-new file mode 100644
-index 000000000..057d5dd3a
---- /dev/null
-+++ b/crates/warpui/src/platform/mac/rendering/metal/renderer/celestial_tests.rs
-@@ -0,0 +1,97 @@
-+use instant::Instant;
-+use pathfinder_color::ColorU;
-+use pathfinder_geometry::rect::RectF;
-+use pathfinder_geometry::vector::vec2f;
-+use warpui_core::rendering;
-+use warpui_core::scene::Scene;
-+
-+use super::{parse_demo_fill, CelestialQuality, CelestialState, SIGNAL_GRACE};
-+
-+fn scene_with_fill(fill: f32) -> Scene {
-+    let encoded = (fill.clamp(0.0, 1.0) * 250.0).round() as u8;
-+    let high = encoded >> 4;
-+    let low = encoded & 0xF;
-+    let color = ColorU::new(0xF0 | (high ^ low ^ 0x5), 0xB0 | high, low, 0);
-+    let mut scene = Scene::new(1.0, rendering::Config::default());
-+    scene
-+        .draw_rect_with_hit_recording(RectF::new(vec2f(0.0, 0.0), vec2f(10.0, 20.0)))
-+        .with_background(color);
-+    scene
-+}
-+
-+#[test]
-+fn glides_toward_cursor_fill_instead_of_jumping() {
-+    let start = Instant::now();
-+    let mut state = CelestialState::new(start);
-+    let fill = state.update(
-+        &scene_with_fill(0.8),
-+        start + std::time::Duration::from_millis(100),
-+    );
-+
-+    assert!(fill > 0.0);
-+    assert!(fill < 0.8);
-+    assert!(state.is_active());
-+}
-+
-+#[test]
-+fn brief_missing_cursor_signal_survives_blink() {
-+    let start = Instant::now();
-+    let mut state = CelestialState::new(start);
-+    state.update(
-+        &scene_with_fill(0.5),
-+        start + std::time::Duration::from_millis(100),
-+    );
-+    let empty = Scene::new(1.0, rendering::Config::default());
-+    let during_blink = state.update(
-+        &empty,
-+        start + SIGNAL_GRACE - std::time::Duration::from_millis(1),
-+    );
-+
-+    assert!(during_blink > 0.0);
-+    assert!(state.is_active());
-+}
-+
-+#[test]
-+fn missing_signal_fades_out_after_grace_period() {
-+    let start = Instant::now();
-+    let mut state = CelestialState::new(start);
-+    state.update(
-+        &scene_with_fill(0.5),
-+        start + std::time::Duration::from_millis(100),
-+    );
-+    let before_fade = state.current_fill;
-+    let empty = Scene::new(1.0, rendering::Config::default());
-+    let after_fade = state.update(
-+        &empty,
-+        start + SIGNAL_GRACE + std::time::Duration::from_millis(200),
-+    );
-+
-+    assert!(after_fade < before_fade);
-+}
-+
-+#[test]
-+fn quality_names_map_to_bounded_trace_steps() {
-+    assert_eq!(
-+        CelestialQuality::from_name("low").unwrap().trace_steps(),
-+        24
-+    );
-+    assert_eq!(
-+        CelestialQuality::from_name("balanced")
-+            .unwrap()
-+            .trace_steps(),
-+        36
-+    );
-+    assert_eq!(
-+        CelestialQuality::from_name("high").unwrap().trace_steps(),
-+        48
-+    );
-+    assert_eq!(CelestialQuality::from_name("turbo"), None);
-+}
-+
-+#[test]
-+fn demo_fill_is_explicit_and_bounded() {
-+    assert_eq!(parse_demo_fill(None).unwrap(), None);
-+    assert_eq!(parse_demo_fill(Some("0.65")).unwrap(), Some(0.65));
-+    assert!(parse_demo_fill(Some("1.1")).is_err());
-+    assert!(parse_demo_fill(Some("not-a-number")).is_err());
-+}
 diff --git a/crates/warpui/src/platform/mac/rendering/metal/renderer/frame.rs b/crates/warpui/src/platform/mac/rendering/metal/renderer/frame.rs
 new file mode 100644
-index 000000000..42312fb3f
+index 00000000..42312fb3
 --- /dev/null
 +++ b/crates/warpui/src/platform/mac/rendering/metal/renderer/frame.rs
 @@ -0,0 +1,624 @@
@@ -1994,376 +1725,30 @@ index 000000000..42312fb3f
 +        .newTextureWithDescriptor(&texture_descriptor)
 +        .expect("device should create an atlas texture")
 +}
-diff --git a/crates/warpui/src/platform/mac/rendering/metal/shaders/celestial_blackhole.metal b/crates/warpui/src/platform/mac/rendering/metal/shaders/celestial_blackhole.metal
-new file mode 100644
-index 000000000..4b0b7d2b3
---- /dev/null
-+++ b/crates/warpui/src/platform/mac/rendering/metal/shaders/celestial_blackhole.metal
-@@ -0,0 +1,338 @@
-+// Schwarzschild black-hole post-process for Warp Celestial.
-+//
-+// Adapted from s0xDk/ghostty-blackhole's blackhole.glsl, which is based on
-+// Eric Bruneton's real-time black-hole rendering work. The original project
-+// is MIT licensed; its copyright notice is retained in THIRD_PARTY_NOTICES.md.
-+// Unlike a painted ring, this shader numerically integrates each near-field
-+// photon's geodesic. The shadow, lensing, repeated disk crossings, and photon
-+// ring are consequences of the traced ray.
-+
-+constant float BH_PI = 3.14159265358979323846;
-+constant float BH_B_CRIT = 2.5980762;
-+constant float BH_LENS_DEPTH = 13.0;
-+constant float BH_DISK_INNER = 1.8;
-+constant float BH_DISK_OUTER = 8.0;
-+constant float BH_DISK_INCLINATION = 1.50;
-+constant float BH_DISK_ROLL = 0.35;
-+constant float BH_DISK_GAIN = 2.2;
-+constant float BH_DISK_OPACITY = 0.90;
-+constant float BH_DISK_TEMPERATURE = 5500.0;
-+constant float BH_DOPPLER_MIX = 0.60;
-+constant float BH_DISK_BEAM = 2.5;
-+constant float BH_DISK_SPEED = 5.0;
-+constant float BH_DISK_WIND = 7.0;
-+constant float BH_DISK_CONTRAST = 1.6;
-+constant float BH_EXPOSURE = 1.4;
-+constant float BH_WORK_AREA = 0.33;
-+constant float BH_DILATION_MIN = 0.20;
-+constant float BH_AREA_MIN = 0.0006;
-+constant float BH_AREA_MAX = 0.032;
-+
-+float bh_hash(float2 p)
-+{
-+    p = fract(p * float2(234.34, 435.345));
-+    p += dot(p, p + 34.23);
-+    return fract(p.x * p.y);
-+}
-+
-+float bh_positive_mod(float value, float period)
-+{
-+    return value - floor(value / period) * period;
-+}
-+
-+float bh_noise_wrap_y(float2 p, float period_y)
-+{
-+    float2 cell = floor(p);
-+    float2 fraction = fract(p);
-+    fraction = fraction * fraction * (3.0 - 2.0 * fraction);
-+    float y0 = bh_positive_mod(cell.y, period_y);
-+    float y1 = bh_positive_mod(cell.y + 1.0, period_y);
-+    return mix(
-+        mix(bh_hash(float2(cell.x, y0)), bh_hash(float2(cell.x + 1.0, y0)), fraction.x),
-+        mix(bh_hash(float2(cell.x, y1)), bh_hash(float2(cell.x + 1.0, y1)), fraction.x),
-+        fraction.y);
-+}
-+
-+float2 bh_mirror_uv(float2 uv)
-+{
-+    float2 wrapped = uv - floor(uv / 2.0) * 2.0;
-+    return 1.0 - abs(1.0 - wrapped);
-+}
-+
-+float2 bh_rotate(float2 value, float angle)
-+{
-+    float cosine = cos(angle);
-+    float sine = sin(angle);
-+    return float2(
-+        cosine * value.x - sine * value.y,
-+        sine * value.x + cosine * value.y);
-+}
-+
-+float2 bh_wander(float time)
-+{
-+    return float2(
-+        0.75 * sin(time * 0.37) + 0.25 * sin(time * 0.83 + 1.0),
-+        0.70 * sin(time * 0.54 + 2.1) + 0.30 * sin(time * 1.07));
-+}
-+
-+float3 bh_blackbody(float temperature)
-+{
-+    float scaled = clamp(temperature, 1500.0, 40000.0) / 100.0;
-+    float red = scaled <= 66.0
-+        ? 1.0
-+        : clamp(1.292936 * pow(scaled - 60.0, -0.1332047), 0.0, 1.0);
-+    float green = scaled <= 66.0
-+        ? clamp(0.3900816 * log(scaled) - 0.6318414, 0.0, 1.0)
-+        : clamp(1.1298909 * pow(scaled - 60.0, -0.0755148), 0.0, 1.0);
-+    float blue = scaled >= 66.0
-+        ? 1.0
-+        : (scaled <= 19.0
-+            ? 0.0
-+            : clamp(0.5432068 * log(scaled - 10.0) - 1.1962540, 0.0, 1.0));
-+    return float3(red, green, blue);
-+}
-+
-+float2 bh_center(float fill, float radius, float aspect, float time)
-+{
-+    float margin = min(radius * mix(1.45, 0.90, fill), 0.5 * (1.0 - BH_WORK_AREA - 0.03));
-+    float x_padding = margin / aspect;
-+    float2 full_low = float2(min(x_padding, 0.5), margin);
-+    float2 full_high = float2(
-+        max(0.5, 1.0 - x_padding),
-+        max(margin, 1.0 - (BH_WORK_AREA + 0.03 + margin)));
-+    float2 home = clamp(float2(0.96, 0.04), full_low, full_high);
-+    float reach = mix(0.06, 1.0, fill);
-+    float2 low = float2(mix(home.x, full_low.x, reach), full_low.y);
-+    float2 high = float2(full_high.x, mix(home.y, full_high.y, reach));
-+    float2 room = max((high - low) * 0.5, float2(0.0));
-+    float2 wobble_amplitude = min(
-+        float2(0.010 + 0.030 * fill),
-+        max(room * 0.35, float2(0.006)));
-+    float2 wander_amplitude = max(room - wobble_amplitude, float2(0.0));
-+    float2 wander = mix(bh_wander(time * 0.04), bh_wander(time * 1.10), fill);
-+    return (low + high) * 0.5
-+        + wander * wander_amplitude
-+        + wobble_amplitude * float2(cos(time * 0.8), sin(time));
-+}
-+
-+float3 bh_far_field(
-+    texture2d<float> scene_texture,
-+    sampler scene_sampler,
-+    float2 uv,
-+    float2 center,
-+    float2 p,
-+    float plen,
-+    float aspect,
-+    float world_scale,
-+    float impact,
-+    float maximum_impact,
-+    float camera_distance,
-+    float window,
-+    float shield)
-+{
-+    float projection = camera_distance
-+        * rsqrt(camera_distance * camera_distance + impact * impact);
-+    float displacement = (2.0 / (world_scale * world_scale)) / max(plen, 0.0001)
-+        * (1.29 * projection + 0.07)
-+        * max(BH_LENS_DEPTH - 2.14 * projection + 0.75, 0.0)
-+        * window * shield;
-+    float2 direction = p / max(plen, 0.00001);
-+    float aberration = 0.035 * smoothstep(1.0, 2.0, impact / maximum_impact);
-+    float3 terminal;
-+    for (int channel = 0; channel < 3; channel++) {
-+        float channel_bend = 1.0 + (float(channel) - 1.0) * aberration;
-+        float2 sample_position = p - direction * displacement * channel_bend;
-+        float2 sample_uv = bh_mirror_uv(
-+            center + sample_position / float2(aspect, 1.0));
-+        terminal[channel] = scene_texture.sample(scene_sampler, sample_uv)[channel];
-+    }
-+    return terminal;
-+}
-+
-+fragment float4 blackhole_fragment(
-+    EffectFragmentData in [[stage_in]],
-+    texture2d<float> scene_texture [[texture(0)]],
-+    constant EffectUniforms *uniforms [[buffer(0)]])
-+{
-+    constexpr sampler scene_sampler(address::clamp_to_edge, filter::linear);
-+    float3 original = scene_texture.sample(scene_sampler, in.uv).rgb;
-+    float fill = saturate(uniforms->fill);
-+    if (fill <= 0.0) {
-+        return float4(original, 1.0);
-+    }
-+
-+    float aspect = uniforms->viewport_size.x / max(uniforms->viewport_size.y, 1.0);
-+    float growth = pow(fill, 0.85);
-+    float radius_minimum = sqrt(BH_AREA_MIN * aspect / BH_PI);
-+    float radius_maximum = sqrt(BH_AREA_MAX * aspect / BH_PI);
-+    float shadow_radius = mix(radius_minimum, radius_maximum, growth);
-+    float intensity = mix(0.10, 1.0, growth);
-+    float time = uniforms->time;
-+    float2 center = bh_center(growth, shadow_radius, aspect, time);
-+
-+    float y_up = 1.0 - in.uv.y;
-+    float shield = smoothstep(BH_WORK_AREA, BH_WORK_AREA + 0.18, y_up);
-+    if (shield <= 0.0001) {
-+        return float4(original, 1.0);
-+    }
-+
-+    float2 p = (in.uv - center) * float2(aspect, 1.0);
-+    float plen = length(p);
-+    float world_scale = BH_B_CRIT / max(shadow_radius, 0.0001);
-+    float2 projected_ray = bh_rotate(float2(p.x, -p.y), BH_DISK_ROLL) * world_scale;
-+    float impact = length(projected_ray);
-+    float maximum_impact = BH_DISK_OUTER + 3.0;
-+    float camera_distance = max(14.0, BH_DISK_OUTER + 5.0);
-+    float window = exp(-pow(plen / (7.0 * shadow_radius), 2.0));
-+
-+    if (impact >= maximum_impact) {
-+        float3 terminal = bh_far_field(
-+            scene_texture,
-+            scene_sampler,
-+            in.uv,
-+            center,
-+            p,
-+            plen,
-+            aspect,
-+            world_scale,
-+            impact,
-+            maximum_impact,
-+            camera_distance,
-+            window,
-+            shield);
-+        return float4(terminal, 1.0);
-+    }
-+
-+    float3 ray_position = float3(projected_ray, camera_distance);
-+    float3 ray_velocity = float3(0.0, 0.0, -1.0);
-+    float angular_momentum_squared = dot(projected_ray, projected_ray);
-+    float inclination_cosine = cos(BH_DISK_INCLINATION);
-+    float inclination_sine = sin(BH_DISK_INCLINATION);
-+    float3 disk_normal = float3(0.0, inclination_sine, inclination_cosine);
-+    float3 disk_axis = float3(0.0, inclination_cosine, -inclination_sine);
-+    float3 emitted = float3(0.0);
-+    float transmittance = 1.0;
-+    bool captured = false;
-+    float previous_side = dot(ray_position, disk_normal);
-+    float3 previous_position = ray_position;
-+    float dilation = mix(1.0, BH_DILATION_MIN, intensity);
-+    uint trace_steps = clamp(uniforms->trace_steps, 16u, 48u);
-+
-+    for (uint step = 0; step < 48u; step++) {
-+        if (step >= trace_steps) {
-+            break;
-+        }
-+        float radius_squared = dot(ray_position, ray_position);
-+        if (radius_squared < 1.0) {
-+            captured = true;
-+            break;
-+        }
-+        if (ray_position.z < -camera_distance && ray_velocity.z < 0.0) {
-+            break;
-+        }
-+        if (radius_squared > 4.0 * camera_distance * camera_distance) {
-+            break;
-+        }
-+
-+        float radius = sqrt(radius_squared);
-+        float delta = clamp(0.16 * radius, 0.03, 1.5);
-+        float3 acceleration = -1.5 * angular_momentum_squared * ray_position
-+            / (radius_squared * radius_squared * radius);
-+        ray_velocity += acceleration * (0.5 * delta);
-+        ray_position += ray_velocity * delta;
-+        radius_squared = dot(ray_position, ray_position);
-+        radius = sqrt(radius_squared);
-+        acceleration = -1.5 * angular_momentum_squared * ray_position
-+            / (radius_squared * radius_squared * radius);
-+        ray_velocity += acceleration * (0.5 * delta);
-+
-+        float side = dot(ray_position, disk_normal);
-+        if (side * previous_side < 0.0 && transmittance > 0.02) {
-+            float crossing_fraction = previous_side / (previous_side - side);
-+            float3 crossing = mix(previous_position, ray_position, crossing_fraction);
-+            float crossing_radius = length(crossing);
-+            if (crossing_radius > BH_DISK_INNER && crossing_radius < BH_DISK_OUTER) {
-+                float band = smoothstep(
-+                    BH_DISK_INNER,
-+                    BH_DISK_INNER * 1.25,
-+                    crossing_radius)
-+                    * (1.0 - smoothstep(
-+                        BH_DISK_OUTER * 0.70,
-+                        BH_DISK_OUTER,
-+                        crossing_radius));
-+                float angle = atan2(dot(crossing, disk_axis), crossing.x);
-+                float turns = angle / (2.0 * BH_PI);
-+                float keplerian = pow(BH_DISK_INNER / crossing_radius, 1.5);
-+                float local_time = sqrt(max(1.0 - 1.5 / crossing_radius, 0.02));
-+                float swirl = crossing_radius * BH_DISK_WIND * 0.12
-+                    - time * keplerian * BH_DISK_SPEED * local_time * dilation;
-+                float streaks = bh_noise_wrap_y(
-+                    float2(
-+                        crossing_radius * 2.8,
-+                        turns * 19.0 + swirl * 3.0),
-+                    19.0) * 0.65
-+                    + bh_noise_wrap_y(
-+                        float2(
-+                            crossing_radius,
-+                            turns * 9.0 + swirl * 1.5 + 7.0),
-+                        9.0) * 0.35;
-+                streaks = 0.35 + BH_DISK_CONTRAST * streaks * streaks;
-+
-+                float3 gas_direction = normalize(cross(disk_normal, crossing));
-+                float beta = clamp(
-+                    rsqrt(max(2.0 * (crossing_radius - 1.0), 0.2)),
-+                    0.0,
-+                    0.99);
-+                float shift = local_time / max(
-+                    1.0 + beta * dot(gas_direction, normalize(ray_velocity)),
-+                    0.05);
-+                shift = mix(1.0, shift, BH_DOPPLER_MIX);
-+
-+                float inner_profile = max(
-+                    1.0 - sqrt(BH_DISK_INNER / crossing_radius),
-+                    0.0);
-+                float temperature_profile = pow(
-+                    BH_DISK_INNER / crossing_radius,
-+                    0.75) * pow(inner_profile, 0.25) / 0.488;
-+                float3 blackbody = bh_blackbody(
-+                    BH_DISK_TEMPERATURE * temperature_profile * shift);
-+                float boost = pow(shift, BH_DISK_BEAM);
-+                float density = band * streaks;
-+                emitted += transmittance * blackbody
-+                    * (BH_DISK_GAIN * 2.2 * density
-+                        * temperature_profile * temperature_profile * boost);
-+                transmittance *= 1.0 - clamp(
-+                    BH_DISK_OPACITY * density,
-+                    0.0,
-+                    1.0);
-+            }
-+        }
-+        previous_side = side;
-+        previous_position = ray_position;
-+    }
-+
-+    if (!captured && dot(ray_position, ray_position) < 4.0) {
-+        captured = true;
-+    }
-+
-+    float3 background = float3(0.0);
-+    if (!captured) {
-+        float3 direction = normalize(ray_velocity);
-+        if (direction.z < -0.05) {
-+            float projection_length = (-BH_LENS_DEPTH - ray_position.z) / direction.z;
-+            float3 sky_position = ray_position + direction * projection_length;
-+            float2 unrolled = bh_rotate(sky_position.xy, -BH_DISK_ROLL) / world_scale;
-+            float2 source_position = float2(unrolled.x, -unrolled.y);
-+            float2 source_uv = bh_mirror_uv(
-+                center
-+                    + (p + (source_position - p) * window * shield)
-+                        / float2(aspect, 1.0));
-+            float toward_sky = smoothstep(0.05, 0.35, -direction.z);
-+            background = scene_texture.sample(scene_sampler, source_uv).rgb * toward_sky;
-+        }
-+    }
-+
-+    float3 color = background * transmittance
-+        + (float3(1.0) - exp(-emitted * BH_EXPOSURE));
-+    return float4(mix(original, color, smoothstep(0.0, 0.04, fill)), 1.0);
-+}
 diff --git a/crates/warpui/src/platform/mac/rendering/metal/shaders/shader_types.h b/crates/warpui/src/platform/mac/rendering/metal/shaders/shader_types.h
-index 4f549d7c1..7e7ca5ceb 100644
+index 4f549d7c..cd36db94 100644
 --- a/crates/warpui/src/platform/mac/rendering/metal/shaders/shader_types.h
 +++ b/crates/warpui/src/platform/mac/rendering/metal/shaders/shader_types.h
-@@ -49,4 +49,16 @@ typedef struct {
+@@ -49,4 +49,14 @@ typedef struct {
    int is_emoji;
  } PerGlyphUniforms;
  
 +// Shared uniforms for the full-screen celestial post-process pass. The fields
 +// are effect-agnostic: `fill` is the 0..1 activity level that drives the look,
-+// `time` animates it, `viewport_size` is used for aspect correction, and
-+// `trace_steps` bounds the blackhole geodesic integrator. Both the blackhole
-+// and sun fragment shaders consume this same struct.
++// `time` animates it, and `viewport_size` is used for aspect correction. Both
++// the blackhole and sun fragment shaders consume this same struct.
 +typedef struct {
 +  vector_float2 viewport_size;
 +  float fill;
 +  float time;
-+  unsigned int trace_steps;
 +} EffectUniforms;
 +
  #endif // shader_types_h
 diff --git a/crates/warpui/src/platform/mac/rendering/metal/shaders/shaders.metal b/crates/warpui/src/platform/mac/rendering/metal/shaders/shaders.metal
-index 8b3eef7ac..821bd839b 100644
+index 8b3eef7a..8083cb65 100644
 --- a/crates/warpui/src/platform/mac/rendering/metal/shaders/shaders.metal
 +++ b/crates/warpui/src/platform/mac/rendering/metal/shaders/shaders.metal
-@@ -400,3 +400,179 @@ fragment float4 glyph_fragment_shader(
+@@ -400,3 +400,339 @@ fragment float4 glyph_fragment_shader(
      color.a *= saturate(in.fade_alpha);
      return color;
  }
@@ -2392,7 +1777,167 @@ index 8b3eef7ac..821bd839b 100644
 +    return out;
 +}
 +
-+#include "celestial_blackhole.metal"
++fragment float4 blackhole_fragment(
++    EffectFragmentData in [[stage_in]],
++    texture2d<float> scene_texture [[texture(0)]],
++    constant EffectUniforms *uniforms [[buffer(0)]])
++{
++    constexpr sampler scene_sampler(address::clamp_to_edge, filter::linear);
++    float fill = saturate(uniforms->fill);
++    float time = uniforms->time;
++    // No active session / no data: pass through the scene unchanged.
++    if (fill <= 0.0) {
++        return scene_texture.sample(scene_sampler, in.uv);
++    }
++
++    // Work in aspect-corrected "square" coordinates where 1 unit == the full
++    // screen height. Computing the radius here (instead of in raw 0..1 UV)
++    // makes the shadow and rings render as true circles on any window shape.
++    float aspect = uniforms->viewport_size.x / max(uniforms->viewport_size.y, 1.0);
++
++    // The blackhole has mass: its center follows a restrained, minute-long
++    // drift instead of roaming like a screensaver. Two low-amplitude,
++    // incommensurate modes prevent an obvious loop while keeping the terminal
++    // content spatially stable. Internal plasma motion carries the energy;
++    // the celestial body itself moves only gradually.
++    float2 center = float2(
++        0.065 * sin(time * 0.11) + 0.015 * sin(time * 0.031 + 1.3),
++        0.050 * sin(time * 0.083 + 2.0) + 0.012 * sin(time * 0.027 - 0.7));
++
++    // Position relative to the (moving) blackhole center, in square space.
++    float2 p = float2((in.uv.x - 0.5) * aspect, in.uv.y - 0.5) - center;
++    float r = length(p);
++    float2 dir = p / max(r, 0.0001);
++
++    // The shadow/horizon grows with the fill level (kept deliberately compact).
++    float r_shadow = 0.03 + 0.05 * fill;
++    float r_ring = r_shadow * 1.5;
++
++    // Gravitational lensing: deflect the sample coordinate outward (in square
++    // space, relative to the hole) so the background wraps around the shadow,
++    // then map back into screen UV for the lookup — adding the hole's offset
++    // back in so the lens tracks the moving center correctly.
++    float bend = (r_shadow * r_shadow) / max(r, r_shadow * 0.5);
++    float2 p_lens = p + dir * (bend * 0.6);
++    float2 lens_uv = float2((p_lens.x + center.x) / aspect + 0.5, (p_lens.y + center.y) + 0.5);
++    lens_uv = clamp(lens_uv, 0.0, 1.0);
++    float3 bg = scene_texture.sample(scene_sampler, lens_uv).rgb;
++
++    // Einstein-ring glow: brighten the lensed background just inside the disk.
++    bg *= 1.0 + 0.35 * smoothstep(r_ring * 1.3, r_ring * 0.9, r);
++
++    // Give the accretion disk its own coordinate system. Rotating the plane a
++    // little keeps it from feeling mechanically horizontal; compressing its
++    // minor axis creates the foreshortening of a disk seen nearly edge-on.
++    // The shadow and photon ring remain circular in screen space.
++    const float disk_tilt = 0.16;
++    const float disk_foreshortening = 0.34;
++    float disk_cos = cos(disk_tilt);
++    float disk_sin = sin(disk_tilt);
++    float disk_major = p.x * disk_cos + p.y * disk_sin;
++    float disk_minor = -p.x * disk_sin + p.y * disk_cos;
++    float2 disk_p = float2(disk_major, disk_minor / disk_foreshortening);
++    float disk_r = length(disk_p);
++    float2 disk_dir = disk_p / max(disk_r, 0.0001);
++
++    // Relativistic Doppler beaming: the side of the disk rotating toward the
++    // viewer is noticeably brighter — the signature EHT crescent. It stays fixed
++    // in screen space (it is set by the disk's orientation) while matter flows
++    // through it, so it reads as a stable bright lobe with structure rotating
++    // beneath it.
++    float approach = smoothstep(0.08, 0.94, 0.5 + 0.5 * (-disk_dir.x));
++    float beam = mix(0.16, 1.65, pow(approach, 0.72));
++
++    // Polar angle in the disk plane, used for everything that orbits.
++    float disk_ang = atan2(disk_dir.y, disk_dir.x);
++
++    // Differential rotation gives the disk fluid shear: hot inner material
++    // completes an orbit in ~3.6 s, while the cooler outer flow takes ~7.4 s.
++    float inner_orbit = 1.0 - smoothstep(r_shadow * 1.08, r_ring * 1.85, disk_r);
++    float spin_rate = mix(0.85, 1.75, inner_orbit);
++    float spin = time * spin_rate;
++
++    // Two spiral arms of infalling matter that rotate around the shadow.
++    float arms = 0.55 + 0.45 * sin(disk_ang * 2.0 - spin + disk_r * 22.0);
++
++    // Turbulent flicker: the accretion plasma is chaotic, so its brightness
++    // shimmers. A few incommensurate frequencies keep it from reading as a
++    // clean mechanical pulse; amplitude is deliberately modest.
++    float flicker = 1.0
++        + 0.14 * sin(disk_ang * 3.0 + time * 5.0)
++        + 0.10 * sin(disk_ang * 7.0 - time * 3.3 + disk_r * 40.0)
++        + 0.08 * sin(time * 8.1 + disk_r * 90.0);
++
++    // Accretion disk: thin, hot ring, white-hot core fading to amber, carved by
++    // the arms and shimmering with turbulence. Its rear half is mostly hidden
++    // here; gravitational lensing redraws that light above the shadow below.
++    float front_visibility = mix(0.12, 1.0, smoothstep(-0.012, 0.018, disk_minor));
++    float disk = exp(-pow((disk_r - r_ring) / 0.014, 2.0))
++        * arms * front_visibility;
++    float3 disk_receding = float3(0.42, 0.055, 0.018);
++    float3 disk_cool = float3(1.0, 0.55, 0.18);
++    float3 disk_hot = float3(1.0, 0.76, 0.42);
++    float radial_heat = 1.0 - smoothstep(r_ring - 0.02, r_ring + 0.03, disk_r);
++    float3 disk_col = mix(disk_receding, disk_cool, approach);
++    disk_col = mix(
++        disk_col,
++        disk_hot,
++        radial_heat * pow(approach, 0.65));
++    float3 col = bg + disk_col * disk * 3.0 * fill * beam * flicker;
++
++    // Light from the hidden rear half bends over the event horizon. A circular
++    // arc is used instead of another flattened ellipse: close to the shadow,
++    // strong lensing makes the far side appear to climb around the hole.
++    float rear_arc_radius = r_shadow * 1.38;
++    float rear_arc = exp(-pow((r - rear_arc_radius) / 0.011, 2.0));
++    float rear_visibility = smoothstep(0.018, -0.012, disk_minor);
++    float rear_major_dir = disk_major / max(r, 0.0001);
++    float rear_approach = smoothstep(0.10, 0.92, 0.5 + 0.5 * (-rear_major_dir));
++    float rear_beam = mix(0.22, 1.35, pow(rear_approach, 0.76));
++    float rear_texture = 0.82
++        + 0.12 * sin(disk_ang * 5.0 - spin * 0.7)
++        + 0.06 * sin(time * 3.1 + r * 120.0);
++    float3 rear_col = mix(disk_receding, float3(1.0, 0.62, 0.22), pow(rear_approach, 0.62));
++    col += rear_col
++        * rear_arc * rear_visibility * rear_beam * rear_texture * 1.45 * fill;
++
++    // A bright hotspot orbiting the ring (a clump of matter), so the spin is obvious.
++    float d_ang = atan2(sin(disk_ang - spin), cos(disk_ang - spin));
++    float beacon = exp(-pow(d_ang / 0.4, 2.0))
++        * exp(-pow((disk_r - r_ring) / 0.018, 2.0)) * front_visibility;
++    col += mix(disk_receding, disk_hot, pow(approach, 0.5)) * beacon * 3.5 * fill;
++
++    // The photon ring is not a uniform neon outline: it becomes white-hot only
++    // on the approaching side and nearly disappears into red on the far side.
++    float photon = exp(-pow((r - r_shadow * 1.12) / 0.0025, 2.0));
++    float photon_major_dir = (dir.x * disk_cos + dir.y * disk_sin);
++    float photon_lobe = smoothstep(-0.62, 0.82, -photon_major_dir);
++    float photon_intensity = mix(0.08, 1.15, pow(photon_lobe, 1.4));
++    float photon_flicker = 0.96 + 0.04 * sin(time * 2.0 + disk_ang * 3.0);
++    col += mix(disk_receding, float3(1.0, 0.93, 0.78), pow(photon_lobe, 0.55))
++        * photon * photon_intensity * photon_flicker * 2.0 * fill;
++
++    // Event horizon: almost circular, but not a mathematically perfect cutout.
++    // Several very slow, low-amplitude modes create a subtly organic silhouette
++    // while the soft absorption boundary keeps it from looking pasted on.
++    float shadow_ang = atan2(dir.y, dir.x);
++    float horizon_variation = r_shadow * 0.015 * (
++        0.55 * sin(shadow_ang * 3.0 + time * 0.11)
++        + 0.30 * sin(shadow_ang * 7.0 - time * 0.07)
++        + 0.15 * sin(shadow_ang * 13.0 + time * 0.04));
++    float horizon_edge = r_shadow + horizon_variation;
++    float horizon_softness = 0.0012 + 0.0008 * fill;
++    float horizon = 1.0 - smoothstep(
++        horizon_edge - horizon_softness,
++        horizon_edge + horizon_softness,
++        r);
++    col = mix(col, float3(0.0), horizon);
++
++    // Fade the whole effect in/out based on fill.
++    float effect_alpha = saturate(fill * 1.6);
++    float3 original = scene_texture.sample(scene_sampler, in.uv).rgb;
++    return float4(mix(original, col, effect_alpha), 1.0);
++}
 +
 +// ---- Noise helpers (organic, non-banded texture for the sun) ----
 +// Sin-based patterns read as fake and banded; value noise + fbm give the
@@ -2544,7 +2089,7 @@ index 8b3eef7ac..821bd839b 100644
 +    return float4(mix(original, col, effect_alpha), 1.0);
 +}
 diff --git a/crates/warpui/src/platform/mac/rendering/renderer.rs b/crates/warpui/src/platform/mac/rendering/renderer.rs
-index 5c8165118..b64c77b2d 100644
+index 5c816511..b64c77b2 100644
 --- a/crates/warpui/src/platform/mac/rendering/renderer.rs
 +++ b/crates/warpui/src/platform/mac/rendering/renderer.rs
 @@ -22,6 +22,15 @@ pub trait Renderer {
@@ -2564,7 +2109,7 @@ index 5c8165118..b64c77b2d 100644
  
  /// Set of available physical graphics devices that can be used to render.
 diff --git a/crates/warpui/src/platform/mac/window.rs b/crates/warpui/src/platform/mac/window.rs
-index ec68a4897..d84185ce6 100644
+index ec68a489..e9a0c433 100644
 --- a/crates/warpui/src/platform/mac/window.rs
 +++ b/crates/warpui/src/platform/mac/window.rs
 @@ -1452,6 +1452,21 @@ extern "C-unwind" fn warp_update_layer(this: &Object) {
@@ -2589,86 +2134,3 @@ index ec68a4897..d84185ce6 100644
          app::callback_dispatcher()
              .for_window(&Window(window.clone()))
              .frame_drawn();
-diff --git a/crates/warpui_core/src/scene.rs b/crates/warpui_core/src/scene.rs
-index 98b7dba7d..4e27d65d1 100644
---- a/crates/warpui_core/src/scene.rs
-+++ b/crates/warpui_core/src/scene.rs
-@@ -687,6 +687,41 @@ impl Scene {
-     pub fn rendering_config(&self) -> &rendering::Config {
-         &self.rendering_config
-     }
-+
-+    /// Decode the signed Claude context value carried by the invisible marker
-+    /// published by the focused terminal pane.
-+    pub fn signed_cursor_fill(&self) -> Option<f32> {
-+        self.overlay_layers
-+            .iter()
-+            .rev()
-+            .chain(self.layers.iter().rev())
-+            .flat_map(|layer| layer.rects.iter().rev())
-+            .find_map(|rect| match rect.background {
-+                Fill::Solid(color) => decode_signed_cursor_fill(color),
-+                Fill::None | Fill::Gradient { .. } => None,
-+            })
-+    }
-+}
-+
-+fn decode_signed_cursor_fill(color: ColorU) -> Option<f32> {
-+    if color.a != 0 {
-+        return None;
-+    }
-+
-+    let high_nibbles = (color.r >> 4, color.g >> 4, color.b >> 4);
-+    if high_nibbles != (0xF, 0xB, 0x0) {
-+        return None;
-+    }
-+
-+    let red = color.r & 0xF;
-+    let high = color.g & 0xF;
-+    let low = color.b & 0xF;
-+    if red != (high ^ low ^ 0x5) {
-+        return None;
-+    }
-+
-+    let encoded = (high << 4) | low;
-+    (encoded <= 250).then_some(encoded as f32 / 250.0)
- }
- 
- impl Rect {
-diff --git a/crates/warpui_core/src/scene_tests.rs b/crates/warpui_core/src/scene_tests.rs
-index 77d2d349e..4c79547bf 100644
---- a/crates/warpui_core/src/scene_tests.rs
-+++ b/crates/warpui_core/src/scene_tests.rs
-@@ -25,6 +25,32 @@ fn test_hit_rect_recording() {
-     assert!(scene.is_covered(Point::new(60., 60., ZIndex::new(1))));
- }
- 
-+#[test]
-+fn signed_cursor_fill_decodes_only_valid_solid_cursor_colors() {
-+    let mut scene = Scene::new(1., rendering::Config::default());
-+    scene
-+        .draw_rect_with_hit_recording(RectF::new(vec2f(0., 0.), vec2f(10., 20.)))
-+        .with_background(ColorU::new(0xF1, 0xBC, 0x08, 0));
-+
-+    assert_eq!(scene.signed_cursor_fill(), Some(0.8));
-+}
-+
-+#[test]
-+fn signed_cursor_fill_rejects_theme_color_and_bad_checksum() {
-+    let mut scene = Scene::new(1., rendering::Config::default());
-+    scene
-+        .draw_rect_with_hit_recording(RectF::new(vec2f(0., 0.), vec2f(10., 20.)))
-+        .with_background(ColorU::new(0xF4, 0xBC, 0x08, 0));
-+    scene
-+        .draw_rect_with_hit_recording(RectF::new(vec2f(10., 0.), vec2f(10., 20.)))
-+        .with_background(ColorU::new(0xF1, 0xBC, 0x08, 255));
-+    scene
-+        .draw_rect_with_hit_recording(RectF::new(vec2f(20., 0.), vec2f(10., 20.)))
-+        .with_background(ColorU::new(120, 80, 40, 255));
-+
-+    assert_eq!(scene.signed_cursor_fill(), None);
-+}
-+
- #[test]
- fn test_nested_clip_bounds_with_intersection() {
-     let mut scene = Scene::new(1., rendering::Config::default());

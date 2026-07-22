@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Claude Code -> Warp blackhole bridge.
 
-Reads Claude Code's status-line JSON from stdin and writes the current context
-window fill ratio (0.0..1.0) to a file that Warp's Metal renderer polls.
+Reads Claude Code's status-line JSON from stdin, stores one context-window fill
+ratio (0.0..1.0) per Claude session, and publishes the pane aggregate through a
+signed OSC cursor-color sequence. Warp decodes the focused pane's signal from
+its rendered cursor, so tabs and concurrent sessions stay isolated.
 
 Intended to be invoked as Claude Code's top-level `statusLine` command in
 `~/.claude/settings.json`:
@@ -27,15 +29,25 @@ tree. It only writes to a configurable cache file and prints a small status
 line for the terminal.
 """
 
+import errno
+import fcntl
+import hashlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
-# Cache file path. Override with BLACKHOLE_CONTEXT_FILE if you want it elsewhere.
-DEFAULT_CONTEXT_FILE = Path.home() / ".cache" / "warp" / "blackhole_context"
-CONTEXT_FILE = Path(os.environ.get("BLACKHOLE_CONTEXT_FILE", DEFAULT_CONTEXT_FILE))
+# Cache directory. Override it when testing or when Warp uses a nonstandard home.
+DEFAULT_CONTEXT_DIR = Path.home() / ".cache" / "warp" / "blackhole_contexts"
+CONTEXT_DIR = Path(os.environ.get("BLACKHOLE_CONTEXT_DIR", DEFAULT_CONTEXT_DIR))
+
+# Cursor-channel encoding adapted from s0xDk/ghostty-blackhole (MIT).
+# The high nibbles are a signature; the low nibbles hold a quantized fill and
+# checksum so ordinary theme cursor colors cannot activate the effect.
+CURSOR_BASE = (0xF0, 0xB0, 0x00)
 
 
 def context_fill(data: dict) -> float:
@@ -58,25 +70,151 @@ def context_fill(data: dict) -> float:
     return 0.0
 
 
-def write_fill(level: float) -> None:
-    """Write the fill level to the cache file."""
+def context_record(data: dict) -> Path | None:
+    """Return the safe cache record for this Warp pane and Claude session."""
+    pane_id = os.environ.get("WARP_TERMINAL_SESSION_UUID", "").lower()
+    session_id = data.get("session_id")
+    if (
+        len(pane_id) != 32
+        or any(character not in "0123456789abcdef" for character in pane_id)
+        or not isinstance(session_id, str)
+        or not session_id
+    ):
+        return None
+
+    session_key = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    return CONTEXT_DIR / pane_id / f"{session_key}.context"
+
+
+@contextmanager
+def cache_lock(record: Path):
+    """Serialize one pane's cache and cursor operations across hook processes."""
+    CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = CONTEXT_DIR / f".{record.parent.name}.lock"
+    with lock_path.open("a", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def write_fill(record: Path, level: float) -> None:
+    """Atomically write the fill level to one Claude session record."""
     level = max(0.0, min(1.0, level))
-    CONTEXT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{CONTEXT_FILE.name}.", dir=CONTEXT_FILE.parent
-    )
+    with cache_lock(record):
+        record.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{record.name}.", dir=record.parent
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as temporary_file:
+                temporary_file.write(f"{level:.6f}\n")
+            os.replace(temporary_name, record)
+        except Exception:
+            Path(temporary_name).unlink(missing_ok=True)
+            raise
+
+
+def remove_fill(record: Path) -> None:
+    """Remove only this Claude session's cache record."""
+    with cache_lock(record):
+        record.unlink(missing_ok=True)
+        try:
+            record.parent.rmdir()
+        except OSError as error:
+            if error.errno not in (errno.ENOENT, errno.ENOTEMPTY):
+                raise
+
+
+def _pane_fill_unlocked(record: Path) -> float | None:
+    maximum = None
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as temporary_file:
-            temporary_file.write(f"{level:.6f}\n")
-        os.replace(temporary_name, CONTEXT_FILE)
-    except Exception:
-        Path(temporary_name).unlink(missing_ok=True)
-        raise
+        records = record.parent.glob("*.context")
+        for candidate in records:
+            fill = float(candidate.read_text(encoding="utf-8").strip())
+            fill = max(0.0, min(1.0, fill))
+            maximum = fill if maximum is None else max(maximum, fill)
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"unable to aggregate context records: {error}") from error
+    return maximum
 
 
-def remove_fill() -> None:
-    """Remove the cache file so the blackhole is hidden."""
-    CONTEXT_FILE.unlink(missing_ok=True)
+def pane_fill(record: Path) -> float | None:
+    """Return the highest live Claude fill in this Warp pane."""
+    with cache_lock(record):
+        return _pane_fill_unlocked(record)
+
+
+def cursor_sequence(level: float | None) -> bytes:
+    """Encode a fill as OSC 12, or reset the cursor with OSC 112."""
+    if level is None:
+        return b"\033]112\007"
+
+    fill = max(0, min(250, int(round(level * 250.0))))
+    high, low = fill >> 4, fill & 0xF
+    rgb = (
+        CURSOR_BASE[0] | (high ^ low ^ 0x5),
+        CURSOR_BASE[1] | high,
+        CURSOR_BASE[2] | low,
+    )
+    return b"\033]12;#%02x%02x%02x\007" % rgb
+
+
+def session_tty() -> Path | None:
+    """Find the terminal inherited by Claude when hooks have no controlling tty."""
+    process_id = os.getppid()
+    for _ in range(10):
+        try:
+            result = subprocess.run(
+                ["ps", "-o", "ppid=,tty=", "-p", str(process_id)],
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=1,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RuntimeError(f"unable to inspect Claude terminal ancestry: {error}") from error
+
+        fields = result.stdout.split()
+        if len(fields) < 2:
+            return None
+        if fields[1] != "??":
+            return Path("/dev") / fields[1]
+        if not fields[0].isdigit() or int(fields[0]) <= 1:
+            return None
+        process_id = int(fields[0])
+    return None
+
+
+def emit_cursor(level: float | None) -> bool:
+    """Write the pane-local fill directly to its terminal cursor state."""
+    sequence = cursor_sequence(level)
+    errors = []
+    try:
+        with Path("/dev/tty").open("wb") as terminal:
+            terminal.write(sequence)
+        return True
+    except OSError as error:
+        errors.append(f"/dev/tty: {error}")
+
+    inherited_tty = session_tty()
+    if inherited_tty is not None:
+        try:
+            with inherited_tty.open("wb") as terminal:
+                terminal.write(sequence)
+            return True
+        except OSError as error:
+            errors.append(f"{inherited_tty}: {error}")
+
+    print("blackhole cursor update failed: " + "; ".join(errors), file=sys.stderr)
+    return False
+
+
+def sync_cursor(record: Path) -> bool:
+    """Atomically read and publish this pane's latest aggregate fill."""
+    with cache_lock(record):
+        return emit_cursor(_pane_fill_unlocked(record))
 
 
 def status_line(data: dict, level: float) -> str:
@@ -97,18 +235,25 @@ def main() -> int:
         data = {}
 
     event = data.get("hook_event_name", "")
+    record = context_record(data)
 
     if event == "SessionEnd":
-        remove_fill()
+        if record is not None:
+            remove_fill(record)
+            sync_cursor(record)
         return 0
 
     if event == "SessionStart":
-        write_fill(0.0)
+        if record is not None:
+            write_fill(record, 0.0)
+            sync_cursor(record)
         return 0
 
     # statusLine / Status / any other regular event: track context fill.
     level = context_fill(data)
-    write_fill(level)
+    if record is not None:
+        write_fill(record, level)
+        sync_cursor(record)
     print(status_line(data, level))
     return 0
 

@@ -16,6 +16,8 @@ BIN_DIR="${HOME}/.local/bin"
 APP_PATH="${APP_DIR}/Warp Celestial.app"
 HOOK_PATH="${INSTALL_ROOT}/claude-token.py"
 LAUNCHER_PATH="${BIN_DIR}/warp-celestial"
+CELESTIAL_PATCH="${SCRIPT_DIR}/patches/celestial-effect.patch"
+LEGACY_CELESTIAL_PATCH="${SCRIPT_DIR}/patches/celestial-effect-v1.patch"
 
 ASSUME_YES=false
 CHECK_ONLY=false
@@ -196,11 +198,26 @@ prepare_warp_source() {
     fail "Managed Warp checkout is at ${current_commit}, expected ${WARP_COMMIT}. Remove ${SOURCE_DIR} to rebuild it."
   fi
 
-  if git -C "$SOURCE_DIR" apply --reverse --check "${SCRIPT_DIR}/patches/celestial-effect.patch"; then
+  if git -C "$SOURCE_DIR" apply --reverse --check "$CELESTIAL_PATCH"; then
     log "Celestial patch is already applied."
-  elif git -C "$SOURCE_DIR" apply --check "${SCRIPT_DIR}/patches/celestial-effect.patch"; then
+  elif git -C "$SOURCE_DIR" apply --check "$CELESTIAL_PATCH"; then
     log "Applying the celestial renderer patch."
-    git -C "$SOURCE_DIR" apply "${SCRIPT_DIR}/patches/celestial-effect.patch"
+    git -C "$SOURCE_DIR" apply "$CELESTIAL_PATCH"
+  elif git -C "$SOURCE_DIR" apply --reverse --check "$LEGACY_CELESTIAL_PATCH"; then
+    log "Upgrading the previous celestial renderer patch in place."
+    git -C "$SOURCE_DIR" apply --reverse "$LEGACY_CELESTIAL_PATCH"
+
+    if ! git -C "$SOURCE_DIR" apply --check "$CELESTIAL_PATCH"; then
+      git -C "$SOURCE_DIR" apply "$LEGACY_CELESTIAL_PATCH" ||
+        fail "Upgrade validation failed and the previous patch could not be restored."
+      fail "Upgrade validation failed; the previous celestial patch was restored."
+    fi
+
+    if ! git -C "$SOURCE_DIR" apply "$CELESTIAL_PATCH"; then
+      git -C "$SOURCE_DIR" apply "$LEGACY_CELESTIAL_PATCH" ||
+        fail "Upgrade failed and the previous patch could not be restored."
+      fail "Upgrade failed; the previous celestial patch was restored."
+    fi
   else
     fail "The managed Warp checkout has unexpected changes. Remove ${SOURCE_DIR} and rerun."
   fi
@@ -252,21 +269,34 @@ set -euo pipefail
 
 APP_PATH=${quoted_app}
 effect="\${1:-blackhole}"
+quality="\${2:-balanced}"
+demo_fill=""
 
 case "\$effect" in
   blackhole | sun) ;;
   --demo)
     effect="blackhole"
-    mkdir -p "\${HOME}/.cache/warp"
-    printf '0.650000\\n' >"\${HOME}/.cache/warp/blackhole_context"
+    demo_fill="0.65"
     ;;
   *)
-    printf 'Usage: warp-celestial [blackhole|sun|--demo]\\n' >&2
+    printf 'Usage: warp-celestial [blackhole|sun|--demo] [low|balanced|high]\\n' >&2
     exit 2
     ;;
 esac
 
-WARP_CELESTIAL="\$effect" /usr/bin/open -na "\$APP_PATH"
+case "\$quality" in
+  low | balanced | high) ;;
+  *)
+    printf 'Quality must be low, balanced, or high.\\n' >&2
+    exit 2
+    ;;
+esac
+
+open_args=(-na "\$APP_PATH" --env "WARP_CELESTIAL=\$effect" --env "WARP_CELESTIAL_QUALITY=\$quality")
+if [[ -n "\$demo_fill" ]]; then
+  open_args+=(--env "WARP_CELESTIAL_DEMO=\$demo_fill")
+fi
+/usr/bin/open "\${open_args[@]}"
 EOF
   chmod 0755 "$LAUNCHER_PATH"
   log "Installed launcher ${LAUNCHER_PATH}."
