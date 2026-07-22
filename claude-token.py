@@ -87,10 +87,11 @@ def context_record(data: dict) -> Path | None:
 
 
 @contextmanager
-def cache_lock():
-    """Serialize cache operations across concurrent Claude hook processes."""
+def cache_lock(record: Path):
+    """Serialize one pane's cache and cursor operations across hook processes."""
     CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
-    with (CONTEXT_DIR / ".lock").open("a", encoding="utf-8") as lock_file:
+    lock_path = CONTEXT_DIR / f".{record.parent.name}.lock"
+    with lock_path.open("a", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
             yield
@@ -101,7 +102,7 @@ def cache_lock():
 def write_fill(record: Path, level: float) -> None:
     """Atomically write the fill level to one Claude session record."""
     level = max(0.0, min(1.0, level))
-    with cache_lock():
+    with cache_lock(record):
         record.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=f".{record.name}.", dir=record.parent
@@ -117,7 +118,7 @@ def write_fill(record: Path, level: float) -> None:
 
 def remove_fill(record: Path) -> None:
     """Remove only this Claude session's cache record."""
-    with cache_lock():
+    with cache_lock(record):
         record.unlink(missing_ok=True)
         try:
             record.parent.rmdir()
@@ -126,19 +127,23 @@ def remove_fill(record: Path) -> None:
                 raise
 
 
+def _pane_fill_unlocked(record: Path) -> float | None:
+    maximum = None
+    try:
+        records = record.parent.glob("*.context")
+        for candidate in records:
+            fill = float(candidate.read_text(encoding="utf-8").strip())
+            fill = max(0.0, min(1.0, fill))
+            maximum = fill if maximum is None else max(maximum, fill)
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"unable to aggregate context records: {error}") from error
+    return maximum
+
+
 def pane_fill(record: Path) -> float | None:
     """Return the highest live Claude fill in this Warp pane."""
-    with cache_lock():
-        maximum = None
-        try:
-            records = record.parent.glob("*.context")
-            for candidate in records:
-                fill = float(candidate.read_text(encoding="utf-8").strip())
-                fill = max(0.0, min(1.0, fill))
-                maximum = fill if maximum is None else max(maximum, fill)
-        except (OSError, ValueError) as error:
-            raise RuntimeError(f"unable to aggregate context records: {error}") from error
-        return maximum
+    with cache_lock(record):
+        return _pane_fill_unlocked(record)
 
 
 def cursor_sequence(level: float | None) -> bytes:
@@ -207,8 +212,9 @@ def emit_cursor(level: float | None) -> bool:
 
 
 def sync_cursor(record: Path) -> bool:
-    """Publish this pane's aggregate fill to Warp's cursor-color channel."""
-    return emit_cursor(pane_fill(record))
+    """Atomically read and publish this pane's latest aggregate fill."""
+    with cache_lock(record):
+        return emit_cursor(_pane_fill_unlocked(record))
 
 
 def status_line(data: dict, level: float) -> str:

@@ -133,6 +133,33 @@ class ContextFileTests(unittest.TestCase):
             finally:
                 claude_token.CONTEXT_DIR = original_dir
 
+    def test_sync_cursor_publishes_while_holding_the_pane_lock(self):
+        events = []
+
+        @claude_token.contextmanager
+        def observed_lock(_record):
+            events.append("locked")
+            try:
+                yield
+            finally:
+                events.append("unlocked")
+
+        with tempfile.TemporaryDirectory() as directory:
+            record = Path(directory) / "pane" / "session.context"
+            record.parent.mkdir()
+            record.write_text("0.75\n", encoding="utf-8")
+            with (
+                mock.patch.object(claude_token, "cache_lock", observed_lock),
+                mock.patch.object(
+                    claude_token,
+                    "emit_cursor",
+                    side_effect=lambda fill: events.append(("emit", fill)) or True,
+                ),
+            ):
+                self.assertTrue(claude_token.sync_cursor(record))
+
+        self.assertEqual(events, ["locked", ("emit", 0.75), "unlocked"])
+
     def test_remove_fill_does_not_hide_unexpected_directory_errors(self):
         with tempfile.TemporaryDirectory() as directory:
             original_dir = claude_token.CONTEXT_DIR

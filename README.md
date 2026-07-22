@@ -162,9 +162,9 @@ that texture and runs one of two fragment shaders:
   procedural embers
 
 Set `WARP_CELESTIAL=sun` before launch to select the sun. Any other value selects
-the black hole. The renderer decodes only the focused solid cursor in the
-current scene, holds the last signal through cursor blinks, and glides between
-context updates rather than changing size in one frame.
+the black hole. The focused pane publishes a zero-sized transparent marker into
+the current scene, so the signal survives cursor blinks and CLI rich input while
+the renderer glides between context updates rather than changing size in one frame.
 
 ### Resource use
 
@@ -188,10 +188,10 @@ Each Claude session writes its own record under the stable Warp terminal pane
 ID inherited through `WARP_TERMINAL_SESSION_UUID`. Multiple Claude sessions in
 one pane aggregate by maximum, so ending one cannot erase another. Different
 tabs and split panes publish independent cursor signals. Warp renders only the
-active tab and draws only the focused split's cursor as solid, so changing tab
-or split focus changes the window-wide effect to that pane's level. An inactive
-pane with no Claude signal fades the effect out after the cursor-blink grace
-period.
+active tab, and only the focused split publishes an invisible scene marker, so
+changing tab or split focus changes the window-wide effect to that pane's level.
+An active pane with no Claude signal fades the effect out after the short signal
+grace period.
 
 ## Manual installation
 

@@ -1,176 +1,105 @@
 diff --git a/app/src/terminal/alt_screen/alt_screen_element.rs b/app/src/terminal/alt_screen/alt_screen_element.rs
-index baa82cba1..736078438 100644
+index baa82cba1..65f525f55 100644
 --- a/app/src/terminal/alt_screen/alt_screen_element.rs
 +++ b/app/src/terminal/alt_screen/alt_screen_element.rs
-@@ -764,7 +764,10 @@ impl Element for AltScreenElement {
-                 model.alt_screen().cursor_style(),
-                 padding_x,
-                 adjusted_grid_origin,
--                self.grid_render_params.warp_theme.cursor().into(),
-+                super::super::color::cursor_color(
-+                    &override_colors,
-+                    self.grid_render_params.warp_theme.cursor().into(),
-+                ),
-                 ctx,
-                 self.terminal_view_id,
-                 self.cursor_hint_text.as_mut(),
+@@ -682,6 +682,11 @@ impl Element for AltScreenElement {
+ 
+         let override_colors = model.override_colors();
+ 
++        super::super::cursor_signal::publish_focused_pane_signal(
++            &override_colors,
++            self.pane_state.is_focused(),
++            ctx,
++        );
+         let grid = model.alt_screen().grid_handler();
+ 
+         let cell_size = Vector2F::new(
 diff --git a/app/src/terminal/block_list_element.rs b/app/src/terminal/block_list_element.rs
-index 6c92e72ca..c81804060 100644
+index 6c92e72ca..e2a398136 100644
 --- a/app/src/terminal/block_list_element.rs
 +++ b/app/src/terminal/block_list_element.rs
-@@ -2605,11 +2605,14 @@ impl BlockListElement {
-                     ctx,
-                     terminal_view_id,
-                     None,
--                    block_grid_params
--                        .grid_render_params
--                        .warp_theme
--                        .cursor()
--                        .into(),
-+                    super::color::cursor_color(
-+                        &block_grid_params.override_colors,
-+                        block_grid_params
-+                            .grid_render_params
-+                            .warp_theme
-+                            .cursor()
-+                            .into(),
-+                    ),
-                     app,
-                 );
-             }
-@@ -2708,25 +2711,28 @@ impl BlockListElement {
-                     ctx,
-                     terminal_view_id,
-                     cursor_hint_text,
--                    if block.is_agent_blocked() {
--                        AnsiColorIdentifier::Yellow
--                            .to_ansi_color(
--                                &block_grid_params
--                                    .grid_render_params
--                                    .warp_theme
--                                    .terminal_colors()
--                                    .normal,
--                            )
--                            .into()
--                    } else if block.is_agent_in_control() {
--                        ai_brand_color(&block_grid_params.grid_render_params.warp_theme)
--                    } else {
--                        block_grid_params
--                            .grid_render_params
--                            .warp_theme
--                            .cursor()
--                            .into()
--                    },
-+                    super::color::cursor_color(
-+                        &block_grid_params.override_colors,
-+                        if block.is_agent_blocked() {
-+                            AnsiColorIdentifier::Yellow
-+                                .to_ansi_color(
-+                                    &block_grid_params
-+                                        .grid_render_params
-+                                        .warp_theme
-+                                        .terminal_colors()
-+                                        .normal,
-+                                )
-+                                .into()
-+                        } else if block.is_agent_in_control() {
-+                            ai_brand_color(&block_grid_params.grid_render_params.warp_theme)
-+                        } else {
-+                            block_grid_params
-+                                .grid_render_params
-+                                .warp_theme
-+                                .cursor()
-+                                .into()
-+                        },
-+                    ),
-                     app,
-                 );
-             }
-diff --git a/app/src/terminal/color.rs b/app/src/terminal/color.rs
-index 234a10c97..e2866f82f 100644
---- a/app/src/terminal/color.rs
-+++ b/app/src/terminal/color.rs
-@@ -77,6 +77,11 @@ impl OverrideList {
-     }
- }
+@@ -3738,6 +3738,11 @@ impl Element for BlockListElement {
+             override_colors: model.override_colors(),
+             bounds: self.bounds.expect("Must be known at paint time"),
+         };
++        super::cursor_signal::publish_focused_pane_signal(
++            &block_grid_params.override_colors,
++            self.pane_state.is_focused(),
++            ctx,
++        );
  
-+/// Resolve the cursor color set by OSC 12, falling back to the configured theme.
-+pub fn cursor_color(override_colors: &OverrideList, theme_color: ColorU) -> ColorU {
-+    override_colors[color_index::CURSOR].unwrap_or(theme_color)
+         // Determine which of the visible blocks are selected.
+         // Note that we have to be careful with the range boundaries since
+diff --git a/app/src/terminal/cursor_signal.rs b/app/src/terminal/cursor_signal.rs
+new file mode 100644
+index 000000000..45ada9b35
+--- /dev/null
++++ b/app/src/terminal/cursor_signal.rs
+@@ -0,0 +1,52 @@
++use warpui::color::ColorU;
++use warpui::geometry::rect::RectF;
++use warpui::geometry::vector::Vector2F;
++use warpui::PaintContext;
++
++use super::color::OverrideList;
++use super::model::ansi::color_index;
++
++fn signal_color(override_colors: &OverrideList, pane_is_focused: bool) -> Option<ColorU> {
++    if !pane_is_focused {
++        return None;
++    }
++
++    override_colors[color_index::CURSOR].map(|color| ColorU::new(color.r, color.g, color.b, 0))
 +}
 +
- impl From<&Colors> for List {
-     fn from(colors: &Colors) -> List {
-         // Type inference fails without this annotation.
-@@ -622,3 +627,28 @@ fn mult_coloru(color: ColorU, rhs: f32) -> ColorU {
-     let b = (color.b as f32 * rhs).clamp(0., 255.);
-     ColorU::new(r as u8, g as u8, b as u8, color.a)
- }
++/// Publish an invisible, focused-pane marker that the window renderer can decode.
++///
++/// The zero-sized, transparent marker remains present when Warp hides the terminal
++/// cursor for CLI rich input and cannot be confused with an unfocused split's cursor.
++pub fn publish_focused_pane_signal(
++    override_colors: &OverrideList,
++    pane_is_focused: bool,
++    ctx: &mut PaintContext,
++) {
++    let Some(color) = signal_color(override_colors, pane_is_focused) else {
++        return;
++    };
++
++    ctx.scene
++        .draw_rect_without_hit_recording(RectF::new(Vector2F::zero(), Vector2F::zero()))
++        .with_background(color);
++}
 +
 +#[cfg(test)]
 +mod tests {
 +    use super::*;
 +
 +    #[test]
-+    fn cursor_color_prefers_the_terminal_override() {
-+        let theme_color = ColorU::new(1, 2, 3, 255);
-+        let override_color = ColorU::new(4, 5, 6, 255);
++    fn signal_is_transparent_and_limited_to_the_focused_pane() {
++        let signed_color = ColorU::new(0xF1, 0xBC, 0x08, 255);
 +        let mut override_colors = OverrideList::empty();
-+        override_colors[color_index::CURSOR] = Some(override_color);
++        override_colors[color_index::CURSOR] = Some(signed_color);
 +
-+        assert_eq!(cursor_color(&override_colors, theme_color), override_color);
-+    }
-+
-+    #[test]
-+    fn cursor_color_falls_back_to_the_theme() {
-+        let theme_color = ColorU::new(1, 2, 3, 255);
-+
++        assert_eq!(signal_color(&override_colors, false), None);
 +        assert_eq!(
-+            cursor_color(&OverrideList::empty(), theme_color),
-+            theme_color
++            signal_color(&override_colors, true),
++            Some(ColorU::new(0xF1, 0xBC, 0x08, 0))
 +        );
++        assert_eq!(signal_color(&OverrideList::empty(), true), None);
 +    }
 +}
-diff --git a/app/src/terminal/grid_renderer.rs b/app/src/terminal/grid_renderer.rs
-index 99bdd5731..2fa87bfc8 100644
---- a/app/src/terminal/grid_renderer.rs
-+++ b/app/src/terminal/grid_renderer.rs
-@@ -664,7 +664,7 @@ fn render_grid_without_ligatures<'a>(
- 
-                     let cursor_color = (grid.cursor_render_point() == Point::new(offset_row, col)
-                         && visible_cursor_shape == Some(CursorShape::Block))
--                    .then(|| theme.cursor().into_solid());
-+                    .then(|| color::cursor_color(override_colors, theme.cursor().into_solid()));
-                     cached_background_color = render_cell(
-                         grid,
-                         offset_row,
-@@ -800,7 +800,7 @@ fn render_grid_without_ligatures<'a>(
-             let cursor_color = (!hide_cursor_cell
-                 && grid.cursor_point() == Point::new(offset_row, col)
-                 && visible_cursor_shape == Some(CursorShape::Block))
--            .then(|| theme.cursor().into_solid());
-+            .then(|| color::cursor_color(override_colors, theme.cursor().into_solid()));
-             cached_background_color = render_cell(
-                 grid,
-                 offset_row,
-@@ -1188,7 +1188,7 @@ fn render_grid_with_ligatures<'a>(
- 
-                     let cursor_color = (grid.cursor_render_point() == Point::new(offset_row, col)
-                         && visible_cursor_shape == Some(CursorShape::Block))
--                    .then(|| theme.cursor().into_solid());
-+                    .then(|| color::cursor_color(override_colors, theme.cursor().into_solid()));
- 
-                     let cell_colors = cell_colors(
-                         &marked_text_cell,
-@@ -1337,7 +1337,7 @@ fn render_grid_with_ligatures<'a>(
-             let cursor_color = (!hide_cursor_cell
-                 && grid.cursor_point() == Point::new(offset_row, col)
-                 && visible_cursor_shape == Some(CursorShape::Block))
--            .then(|| theme.cursor().into_solid());
-+            .then(|| color::cursor_color(override_colors, theme.cursor().into_solid()));
-             let cell_colors = cell_colors(
-                 cell,
-                 colors,
+diff --git a/app/src/terminal/mod.rs b/app/src/terminal/mod.rs
+index 78f063bde..47fda496c 100644
+--- a/app/src/terminal/mod.rs
++++ b/app/src/terminal/mod.rs
+@@ -35,6 +35,7 @@ mod buy_credits_banner;
+ pub mod color;
+ mod command_corrections_denylist;
+ pub mod conversation_restoration;
++mod cursor_signal;
+ pub mod dynamic_enum_suggestions;
+ pub mod enable_auto_reload_modal;
+ pub mod event;
 diff --git a/crates/warpui/build.rs b/crates/warpui/build.rs
 index f9b6a3ede..268ffcf70 100644
 --- a/crates/warpui/build.rs
@@ -1334,7 +1263,7 @@ index 000000000..44acc1d1c
 +mod tests;
 diff --git a/crates/warpui/src/platform/mac/rendering/metal/renderer/celestial_tests.rs b/crates/warpui/src/platform/mac/rendering/metal/renderer/celestial_tests.rs
 new file mode 100644
-index 000000000..094a1d571
+index 000000000..057d5dd3a
 --- /dev/null
 +++ b/crates/warpui/src/platform/mac/rendering/metal/renderer/celestial_tests.rs
 @@ -0,0 +1,97 @@
@@ -1351,7 +1280,7 @@ index 000000000..094a1d571
 +    let encoded = (fill.clamp(0.0, 1.0) * 250.0).round() as u8;
 +    let high = encoded >> 4;
 +    let low = encoded & 0xF;
-+    let color = ColorU::new(0xF0 | (high ^ low ^ 0x5), 0xB0 | high, low, 255);
++    let color = ColorU::new(0xF0 | (high ^ low ^ 0x5), 0xB0 | high, low, 0);
 +    let mut scene = Scene::new(1.0, rendering::Config::default());
 +    scene
 +        .draw_rect_with_hit_recording(RectF::new(vec2f(0.0, 0.0), vec2f(10.0, 20.0)))
@@ -2661,17 +2590,16 @@ index ec68a4897..d84185ce6 100644
              .for_window(&Window(window.clone()))
              .frame_drawn();
 diff --git a/crates/warpui_core/src/scene.rs b/crates/warpui_core/src/scene.rs
-index 98b7dba7d..7ae1e776b 100644
+index 98b7dba7d..4e27d65d1 100644
 --- a/crates/warpui_core/src/scene.rs
 +++ b/crates/warpui_core/src/scene.rs
-@@ -687,6 +687,38 @@ impl Scene {
+@@ -687,6 +687,41 @@ impl Scene {
      pub fn rendering_config(&self) -> &rendering::Config {
          &self.rendering_config
      }
 +
-+    /// Decode the signed Claude context value carried by the focused terminal
-+    /// cursor. Inactive split panes use hollow cursors (border-only), so
-+    /// limiting this to solid backgrounds selects the active pane.
++    /// Decode the signed Claude context value carried by the invisible marker
++    /// published by the focused terminal pane.
 +    pub fn signed_cursor_fill(&self) -> Option<f32> {
 +        self.overlay_layers
 +            .iter()
@@ -2686,6 +2614,10 @@ index 98b7dba7d..7ae1e776b 100644
 +}
 +
 +fn decode_signed_cursor_fill(color: ColorU) -> Option<f32> {
++    if color.a != 0 {
++        return None;
++    }
++
 +    let high_nibbles = (color.r >> 4, color.g >> 4, color.b >> 4);
 +    if high_nibbles != (0xF, 0xB, 0x0) {
 +        return None;
@@ -2704,10 +2636,10 @@ index 98b7dba7d..7ae1e776b 100644
  
  impl Rect {
 diff --git a/crates/warpui_core/src/scene_tests.rs b/crates/warpui_core/src/scene_tests.rs
-index 77d2d349e..ffe14628b 100644
+index 77d2d349e..4c79547bf 100644
 --- a/crates/warpui_core/src/scene_tests.rs
 +++ b/crates/warpui_core/src/scene_tests.rs
-@@ -25,6 +25,29 @@ fn test_hit_rect_recording() {
+@@ -25,6 +25,32 @@ fn test_hit_rect_recording() {
      assert!(scene.is_covered(Point::new(60., 60., ZIndex::new(1))));
  }
  
@@ -2716,7 +2648,7 @@ index 77d2d349e..ffe14628b 100644
 +    let mut scene = Scene::new(1., rendering::Config::default());
 +    scene
 +        .draw_rect_with_hit_recording(RectF::new(vec2f(0., 0.), vec2f(10., 20.)))
-+        .with_background(ColorU::new(0xF1, 0xBC, 0x08, 255));
++        .with_background(ColorU::new(0xF1, 0xBC, 0x08, 0));
 +
 +    assert_eq!(scene.signed_cursor_fill(), Some(0.8));
 +}
@@ -2726,7 +2658,10 @@ index 77d2d349e..ffe14628b 100644
 +    let mut scene = Scene::new(1., rendering::Config::default());
 +    scene
 +        .draw_rect_with_hit_recording(RectF::new(vec2f(0., 0.), vec2f(10., 20.)))
-+        .with_background(ColorU::new(0xF4, 0xBC, 0x08, 255));
++        .with_background(ColorU::new(0xF4, 0xBC, 0x08, 0));
++    scene
++        .draw_rect_with_hit_recording(RectF::new(vec2f(10., 0.), vec2f(10., 20.)))
++        .with_background(ColorU::new(0xF1, 0xBC, 0x08, 255));
 +    scene
 +        .draw_rect_with_hit_recording(RectF::new(vec2f(20., 0.), vec2f(10., 20.)))
 +        .with_background(ColorU::new(120, 80, 40, 255));
