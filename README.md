@@ -44,7 +44,7 @@ Useful options:
 ```text
 --skip-claude-config    Build the app without editing Claude Code settings
 --no-launch             Do not open the app after installation
---yes                   Accept installer prompts
+--yes                   Accept prompts; required for non-interactive installation
 ```
 
 ## What the installer does

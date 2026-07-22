@@ -3,6 +3,7 @@
 
 import json
 import os
+import shlex
 import shutil
 import stat
 import sys
@@ -46,7 +47,8 @@ def ensure_lifecycle_hook(settings: dict, event: str, command: str) -> bool:
 def configure(settings_path: Path, hook_path: Path) -> Tuple[bool, Optional[Path]]:
     """Update settings atomically and return the backup path when one is made."""
     resolved_hook = str(hook_path.expanduser().resolve())
-    desired_status_line = {"type": "command", "command": resolved_hook}
+    hook_command = shlex.quote(resolved_hook)
+    desired_status_line = {"type": "command", "command": hook_command}
 
     if settings_path.exists():
         try:
@@ -63,7 +65,7 @@ def configure(settings_path: Path, hook_path: Path) -> Tuple[bool, Optional[Path
     changed = data.get("statusLine") != desired_status_line
     data["statusLine"] = desired_status_line
     for event in LIFECYCLE_EVENTS:
-        changed = ensure_lifecycle_hook(data, event, resolved_hook) or changed
+        changed = ensure_lifecycle_hook(data, event, hook_command) or changed
 
     if not changed:
         return False, None

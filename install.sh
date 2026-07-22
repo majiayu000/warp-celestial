@@ -58,8 +58,10 @@ confirm() {
     return 0
   fi
   if [[ ! -t 0 ]]; then
-    [[ "$default_answer" == yes ]]
-    return
+    printf '%s\n' \
+      "[warp-celestial] Non-interactive confirmation requires the explicit --yes option." \
+      >&2
+    return 1
   fi
 
   if [[ "$default_answer" == yes ]]; then

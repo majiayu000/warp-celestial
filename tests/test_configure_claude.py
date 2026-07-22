@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import shlex
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,16 +18,23 @@ class ConfigureClaudeTests(unittest.TestCase):
     def test_creates_status_line_and_lifecycle_hooks(self):
         with tempfile.TemporaryDirectory() as directory:
             settings_path = Path(directory) / ".claude" / "settings.json"
-            hook_path = Path(directory) / "claude-token.py"
+            hook_path = Path(directory) / "hook scripts" / "claude token.py"
+            hook_path.parent.mkdir()
+            hook_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            hook_path.chmod(0o755)
 
             changed, backup = configure_claude.configure(settings_path, hook_path)
 
             self.assertTrue(changed)
             self.assertIsNone(backup)
             settings = json.loads(settings_path.read_text(encoding="utf-8"))
-            command = str(hook_path.resolve())
+            command = shlex.quote(str(hook_path.resolve()))
             self.assertEqual(
                 settings["statusLine"], {"type": "command", "command": command}
+            )
+            self.assertEqual(
+                subprocess.run(["/bin/sh", "-c", command], check=False).returncode,
+                0,
             )
             for event in configure_claude.LIFECYCLE_EVENTS:
                 self.assertEqual(

@@ -42,7 +42,7 @@ cd warp-celestial
 ```text
 --skip-claude-config    不修改 Claude Code 配置
 --no-launch             安装完成后不启动应用
---yes                   自动接受安装器询问
+--yes                   自动接受询问；非交互安装时必须显式提供
 ```
 
 ## 安装器具体做什么
