@@ -102,6 +102,49 @@ class ContextFileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             claude_token.remove_fill(Path(directory) / "missing" / "session.context")
 
+    def test_pane_fill_uses_maximum_session_and_empty_pane_resets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pane = Path(directory) / "pane"
+            first = pane / "first.context"
+            second = pane / "second.context"
+            claude_token.write_fill(first, 0.8)
+            claude_token.write_fill(second, 0.2)
+
+            self.assertEqual(claude_token.pane_fill(first), 0.8)
+            claude_token.remove_fill(first)
+            self.assertEqual(claude_token.pane_fill(second), 0.2)
+            claude_token.remove_fill(second)
+            self.assertIsNone(claude_token.pane_fill(second))
+
+
+class CursorChannelTests(unittest.TestCase):
+    def test_cursor_sequence_round_trips_fill_and_checksum(self):
+        sequence = claude_token.cursor_sequence(0.8)
+        encoded = sequence.removeprefix(b"\033]12;#").removesuffix(b"\007")
+        red, green, blue = bytes.fromhex(encoded.decode("ascii"))
+        high = green & 0xF
+        low = blue & 0xF
+
+        self.assertEqual(red >> 4, 0xF)
+        self.assertEqual(green >> 4, 0xB)
+        self.assertEqual(blue >> 4, 0x0)
+        self.assertEqual(red & 0xF, high ^ low ^ 0x5)
+        self.assertAlmostEqual(((high << 4) | low) / 250.0, 0.8)
+
+    def test_cursor_sequence_resets_when_no_session_remains(self):
+        self.assertEqual(claude_token.cursor_sequence(None), b"\033]112\007")
+
+    def test_emit_cursor_uses_controlling_tty_without_process_scan(self):
+        terminal = mock.mock_open()
+        with (
+            mock.patch.object(Path, "open", terminal),
+            mock.patch.object(claude_token, "session_tty") as session_tty,
+        ):
+            self.assertTrue(claude_token.emit_cursor(0.5))
+
+        session_tty.assert_not_called()
+        terminal().write.assert_called_once_with(claude_token.cursor_sequence(0.5))
+
 
 if __name__ == "__main__":
     unittest.main()

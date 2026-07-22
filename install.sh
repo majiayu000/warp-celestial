@@ -252,23 +252,34 @@ set -euo pipefail
 
 APP_PATH=${quoted_app}
 effect="\${1:-blackhole}"
+quality="\${2:-balanced}"
+demo_fill=""
 
 case "\$effect" in
   blackhole | sun) ;;
   --demo)
     effect="blackhole"
-    demo_record="\${HOME}/.cache/warp/blackhole_contexts/demo/demo.context"
-    mkdir -p "\$(dirname "\$demo_record")"
-    printf '0.650000\\n' >"\$demo_record"
-    (sleep 30; rm -f "\$demo_record"; rmdir "\$(dirname "\$demo_record")" 2>/dev/null || true) &
+    demo_fill="0.65"
     ;;
   *)
-    printf 'Usage: warp-celestial [blackhole|sun|--demo]\\n' >&2
+    printf 'Usage: warp-celestial [blackhole|sun|--demo] [low|balanced|high]\\n' >&2
     exit 2
     ;;
 esac
 
-WARP_CELESTIAL="\$effect" /usr/bin/open -na "\$APP_PATH"
+case "\$quality" in
+  low | balanced | high) ;;
+  *)
+    printf 'Quality must be low, balanced, or high.\\n' >&2
+    exit 2
+    ;;
+esac
+
+open_args=(-na "\$APP_PATH" --env "WARP_CELESTIAL=\$effect" --env "WARP_CELESTIAL_QUALITY=\$quality")
+if [[ -n "\$demo_fill" ]]; then
+  open_args+=(--env "WARP_CELESTIAL_DEMO=\$demo_fill")
+fi
+/usr/bin/open "\${open_args[@]}"
 EOF
   chmod 0755 "$LAUNCHER_PATH"
   log "Installed launcher ${LAUNCHER_PATH}."

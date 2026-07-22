@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Claude Code -> Warp blackhole bridge.
 
-Reads Claude Code's status-line JSON from stdin and writes the current context
-window fill ratio (0.0..1.0) to a cache record that Warp's Metal renderer polls.
-Records are isolated by Warp terminal pane and Claude session, so tabs and
-concurrent Claude sessions cannot overwrite one another.
+Reads Claude Code's status-line JSON from stdin, stores one context-window fill
+ratio (0.0..1.0) per Claude session, and publishes the pane aggregate through a
+signed OSC cursor-color sequence. Warp decodes the focused pane's signal from
+its rendered cursor, so tabs and concurrent sessions stay isolated.
 
 Intended to be invoked as Claude Code's top-level `statusLine` command in
 `~/.claude/settings.json`:
@@ -29,16 +29,22 @@ tree. It only writes to a configurable cache file and prints a small status
 line for the terminal.
 """
 
+import hashlib
 import json
 import os
+import subprocess
 import sys
-import hashlib
 import tempfile
 from pathlib import Path
 
 # Cache directory. Override it when testing or when Warp uses a nonstandard home.
 DEFAULT_CONTEXT_DIR = Path.home() / ".cache" / "warp" / "blackhole_contexts"
 CONTEXT_DIR = Path(os.environ.get("BLACKHOLE_CONTEXT_DIR", DEFAULT_CONTEXT_DIR))
+
+# Cursor-channel encoding adapted from s0xDk/ghostty-blackhole (MIT).
+# The high nibbles are a signature; the low nibbles hold a quantized fill and
+# checksum so ordinary theme cursor colors cannot activate the effect.
+CURSOR_BASE = (0xF0, 0xB0, 0x00)
 
 
 def context_fill(data: dict) -> float:
@@ -103,6 +109,90 @@ def remove_fill(record: Path) -> None:
         pass
 
 
+def pane_fill(record: Path) -> float | None:
+    """Return the highest live Claude fill in this Warp pane."""
+    maximum = None
+    try:
+        records = record.parent.glob("*.context")
+        for candidate in records:
+            fill = float(candidate.read_text(encoding="utf-8").strip())
+            fill = max(0.0, min(1.0, fill))
+            maximum = fill if maximum is None else max(maximum, fill)
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"unable to aggregate context records: {error}") from error
+    return maximum
+
+
+def cursor_sequence(level: float | None) -> bytes:
+    """Encode a fill as OSC 12, or reset the cursor with OSC 112."""
+    if level is None:
+        return b"\033]112\007"
+
+    fill = max(0, min(250, int(round(level * 250.0))))
+    high, low = fill >> 4, fill & 0xF
+    rgb = (
+        CURSOR_BASE[0] | (high ^ low ^ 0x5),
+        CURSOR_BASE[1] | high,
+        CURSOR_BASE[2] | low,
+    )
+    return b"\033]12;#%02x%02x%02x\007" % rgb
+
+
+def session_tty() -> Path | None:
+    """Find the terminal inherited by Claude when hooks have no controlling tty."""
+    process_id = os.getppid()
+    for _ in range(10):
+        try:
+            result = subprocess.run(
+                ["ps", "-o", "ppid=,tty=", "-p", str(process_id)],
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=1,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RuntimeError(f"unable to inspect Claude terminal ancestry: {error}") from error
+
+        fields = result.stdout.split()
+        if len(fields) < 2:
+            return None
+        if fields[1] != "??":
+            return Path("/dev") / fields[1]
+        if not fields[0].isdigit() or int(fields[0]) <= 1:
+            return None
+        process_id = int(fields[0])
+    return None
+
+
+def emit_cursor(level: float | None) -> bool:
+    """Write the pane-local fill directly to its terminal cursor state."""
+    sequence = cursor_sequence(level)
+    errors = []
+    try:
+        with Path("/dev/tty").open("wb") as terminal:
+            terminal.write(sequence)
+        return True
+    except OSError as error:
+        errors.append(f"/dev/tty: {error}")
+
+    inherited_tty = session_tty()
+    if inherited_tty is not None:
+        try:
+            with inherited_tty.open("wb") as terminal:
+                terminal.write(sequence)
+            return True
+        except OSError as error:
+            errors.append(f"{inherited_tty}: {error}")
+
+    print("blackhole cursor update failed: " + "; ".join(errors), file=sys.stderr)
+    return False
+
+
+def sync_cursor(record: Path) -> bool:
+    """Publish this pane's aggregate fill to Warp's cursor-color channel."""
+    return emit_cursor(pane_fill(record))
+
+
 def status_line(data: dict, level: float) -> str:
     """Build a short status line for Claude Code's status bar."""
     model = (data.get("model") or {}).get("display_name", "Claude")
@@ -126,17 +216,20 @@ def main() -> int:
     if event == "SessionEnd":
         if record is not None:
             remove_fill(record)
+            sync_cursor(record)
         return 0
 
     if event == "SessionStart":
         if record is not None:
             write_fill(record, 0.0)
+            sync_cursor(record)
         return 0
 
     # statusLine / Status / any other regular event: track context fill.
     level = context_fill(data)
     if record is not None:
         write_fill(record, level)
+        sync_cursor(record)
     print(status_line(data, level))
     return 0
 

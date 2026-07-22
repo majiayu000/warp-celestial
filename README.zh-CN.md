@@ -2,9 +2,9 @@
 
 [English README](README.md)
 
-Warp Celestial 为 macOS 版 Warp 的 Metal 渲染器加入动态黑洞或太阳效果。
-黑洞会扭曲终端内容，太阳会照亮终端场景；天体大小由 Claude Code 当前
-上下文窗口的使用比例驱动。
+Warp Celestial 为 macOS 版 Warp 的 Metal 渲染器加入基于测地线追踪的黑洞或
+动态太阳效果。黑洞通过 Schwarzschild 光线积分真实扭曲终端内容，大小由当前
+焦点 Claude Code Pane 的上下文窗口使用比例驱动。
 
 ![Warp Celestial 黑洞](blackhole.png)
 
@@ -74,6 +74,13 @@ cd warp-celestial
 ~/.local/bin/warp-celestial sun
 ```
 
+第二个可选参数用于选择 GPU 开销：`low`（24 步光线积分）、`balanced`
+（36 步，默认）或 `high`（48 步）。例如：
+
+```bash
+~/.local/bin/warp-celestial blackhole low
+```
+
 默认效果是黑洞。Claude Code 没有上报上下文占用时，天体会隐藏，这是预期
 行为。想立即预览可以运行：
 
@@ -81,8 +88,8 @@ cd warp-celestial
 ~/.local/bin/warp-celestial --demo
 ```
 
-`--demo` 会在 `~/.cache/warp/blackhole_contexts` 下写入临时的 65% 占用记录，
-并在 30 秒后自动删除。
+`--demo` 会启动一个固定为 65% 上下文占用的独立应用进程，不会修改上下文缓存；
+效果持续到该进程退出。也可以使用 `--demo low` 指定性能档位。
 
 如果 `~/.local/bin` 已加入 `PATH`，可以使用短命令：
 
@@ -102,60 +109,66 @@ Claude Code statusLine JSON
           v
 claude-token.py
           |
-          |  每个 Claude 会话写入一个 0.0 到 1.0 的记录
+          |  每会话保存记录，并在当前 Pane 内聚合
           v
 ~/.cache/warp/blackhole_contexts/<pane>/<session>.context
           |
-          |  Warp 最多每 100 ms 聚合一次最大值
+          |  带校验签名的 OSC 12 光标颜色信号
           v
-Warp Metal 渲染器
+当前焦点 Warp Tab / 分屏 Pane
+          |
+          v
+Warp Metal 渲染器（平滑后的 0.0 到 1.0 uniform）
   1. 把正常终端场景渲染到离屏 BGRA 纹理
-  2. 在全屏 fragment shader 中采样该纹理
-  3. 添加透镜、吸积盘或日冕以及动画
+  2. 逐像素积分近场 Schwarzschild 光子路径
+  3. 添加终端透镜、多次吸积盘穿越和相对论光照
   4. 输出最终合成画面
 ```
 
 ### Tab、Pane 与并发会话
 
 每个 Claude 会话会按照继承的 `WARP_TERMINAL_SESSION_UUID` 写入自己的记录。
-结束一个会话只会删除它自己的文件，不会再把其他运行中的会话状态清空。同一个
-Pane 内的多个会话以及不同 Tab 中的会话，目前会取上下文占用的最大值。
-
-Metal 效果目前仍是窗口级的；切换 Tab 或分屏焦点时，还不能只显示焦点 Pane 的
-状态。完整的 Tab 级切换需要把 Warp UI 的活动 Pane ID 传进渲染 Scene。缓存结构
-已经按 Pane 隔离，后续加入这层映射不需要再次迁移数据。
+同一 Pane 内多个 Claude 会话取最大值，结束一个会话不会清空其他会话。不同 Tab
+和分屏 Pane 会发布独立的光标信号；Warp 只渲染活动 Tab，并且只有焦点分屏的光标
+是实心，因此切换 Tab 或分屏焦点后，窗口级天体会跟随新的 Pane 占用。焦点 Pane
+没有 Claude 信号时，效果会在光标闪烁保护时间后平滑淡出。
 
 ### 上下文桥接
 
 Claude Code 会把 JSON 传给配置的 `statusLine` 命令。独立脚本
 `claude-token.py` 优先读取 `used_percentage`；没有该字段时，再使用 token
-总量除以上下文窗口大小。结果会被限制在 `0.0..1.0`，然后写成渲染器可读取
-的简短文本。
+总量除以上下文窗口大小。结果会被限制在 `0.0..1.0`，原子写入会话记录，再取
+同一 Pane 仍在运行会话的最大值，编码成带校验和的 OSC 12 光标颜色。普通主题
+光标颜色无法误触发这套签名。
 
 安装器会把同一个脚本注册到 Claude Code 的 `SessionStart` 和 `SessionEnd`
-hooks。会话开始时数值重置为零，会话结束时删除缓存文件。文件不存在或内容
-无效时按零处理，不会虚构数据。
+hooks。开始时创建零值记录；结束时只删除该会话并重新发布剩余最大值。没有会话
+后恢复正常光标颜色。OSC 信号直接写入继承的终端，不会污染状态栏文字输出。
 
 ### Metal 渲染器
 
 补丁只修改 Warp 的 macOS Metal 后端。正常终端先绘制到复用的离屏纹理，
 第二个全屏 pass 再根据所选效果运行 shader：
 
-- `blackhole_fragment`：引力透镜、事件视界、光子环、多普勒增亮吸积盘和缓慢漂移
+- `blackhole_fragment`：Schwarzschild 测地线数值积分、真实捕获光线、多重吸积盘
+  成像、黑体温度、多普勒频移/增亮、时间膨胀和远场弱透镜
 - `sun_fragment`：临边昏暗、米粒组织、太阳黑子、日冕和程序化喷射粒子
 
-启动时设置 `WARP_CELESTIAL=sun` 会选择太阳，其他值选择黑洞。两种效果共享
-窗口尺寸、时间和上下文占用 uniform。
+启动时设置 `WARP_CELESTIAL=sun` 会选择太阳，其他值选择黑洞。渲染器只解码
+当前 Scene 中焦点 Pane 的实心光标，在光标闪烁期间保留上次数值，并在上下文
+更新之间平滑过渡，不会单帧跳变。
 
 ### 资源消耗
 
 占用值为零时，窗口保持 Warp 原本的事件驱动刷新，效果不会持续动画。占用值
 大于零时，为了让 shader 运动，窗口会按照显示器刷新率重绘。实现会复用离屏
-纹理、在动画帧之间保留场景缓存，并把上下文文件读取限制为每 100 ms 最多一次。
+纹理并在动画帧之间保留 Scene 缓存；Warp 不扫描文件系统，Pane 本地数值直接随
+它本来就要渲染的 Scene 到达 Metal 后端。
 
-激活状态仍然比原版 Warp 多一次全屏渲染，因此会增加 GPU 时间和内存带宽。
-窗口越大、Retina 分辨率越高、显示器刷新率越高，开销越明显。关闭自定义应用
-或结束 Claude Code 会话即可停止持续渲染。
+激活状态比原版 Warp 多一次全屏 pass，靠近黑洞的像素还会执行 24 到 48 步光线
+积分，因此会增加 GPU 时间和内存带宽。底部工作区会提前退出，远场使用更便宜的
+解析近似。窗口越大、Retina 分辨率越高、刷新率越高，开销越明显。笔记本推荐
+`low`，录制演示可用 `high`；关闭自定义应用或结束焦点 Claude 会话即可停止刷新。
 
 ## 手动安装
 
@@ -261,6 +274,7 @@ find ~/.cache/warp/blackhole_contexts -maxdepth 3 -name '*.context' -print -exec
 | `scripts/configure_claude.py` | 原子且保留既有内容地更新 Claude Code 配置 |
 | `patches/celestial-effect.patch` | 完整 Warp 源码补丁 |
 | `claude-token.py` | Claude Code 上下文到渲染器的桥接脚本 |
+| `THIRD_PARTY_NOTICES.md` | 所适配上游工作的归属与 MIT 声明 |
 | `blackhole.png` | 从真实补丁版应用截取的 README 预览图 |
 | `warp-channel-config.example` | 可选开发配置，安装器不会使用 |
 | `src/main.rs` | 历史独立 Metal PoC |
@@ -272,3 +286,5 @@ find ~/.cache/warp/blackhole_contexts -maxdepth 3 -name '*.context' -print -exec
 - 补丁固定对应 Warp 提交 `69ce3728`，更新的 Warp 版本可能需要重新适配。
 - 本地构建的 OSS 应用采用 ad-hoc 签名，没有经过 Apple 公证。
 - Warp 使用 AGPL-3.0；本补丁应按照相同许可证义务应用并随 Warp 分发。
+- 测地线渲染器与光标通道协议保留了 `THIRD_PARTY_NOTICES.md` 中记录的上游
+  MIT 归属。
