@@ -1,3 +1,4 @@
+import errno
 import importlib.util
 import os
 import tempfile
@@ -115,6 +116,39 @@ class ContextFileTests(unittest.TestCase):
             self.assertEqual(claude_token.pane_fill(second), 0.2)
             claude_token.remove_fill(second)
             self.assertIsNone(claude_token.pane_fill(second))
+
+    def test_cache_operations_take_and_release_an_exclusive_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original_dir = claude_token.CONTEXT_DIR
+            claude_token.CONTEXT_DIR = Path(directory)
+            record = Path(directory) / "pane" / "session.context"
+            try:
+                with mock.patch.object(claude_token.fcntl, "flock") as flock:
+                    claude_token.write_fill(record, 0.5)
+
+                self.assertEqual(
+                    [call.args[1] for call in flock.call_args_list],
+                    [claude_token.fcntl.LOCK_EX, claude_token.fcntl.LOCK_UN],
+                )
+            finally:
+                claude_token.CONTEXT_DIR = original_dir
+
+    def test_remove_fill_does_not_hide_unexpected_directory_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original_dir = claude_token.CONTEXT_DIR
+            claude_token.CONTEXT_DIR = Path(directory)
+            record = Path(directory) / "pane" / "session.context"
+            claude_token.write_fill(record, 0.5)
+            try:
+                with mock.patch.object(
+                    Path,
+                    "rmdir",
+                    side_effect=OSError(errno.EACCES, "permission denied"),
+                ):
+                    with self.assertRaises(PermissionError):
+                        claude_token.remove_fill(record)
+            finally:
+                claude_token.CONTEXT_DIR = original_dir
 
 
 class CursorChannelTests(unittest.TestCase):

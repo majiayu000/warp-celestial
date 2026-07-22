@@ -29,12 +29,15 @@ tree. It only writes to a configurable cache file and prints a small status
 line for the terminal.
 """
 
+import errno
+import fcntl
 import hashlib
 import json
 import os
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 # Cache directory. Override it when testing or when Warp uses a nonstandard home.
@@ -83,44 +86,59 @@ def context_record(data: dict) -> Path | None:
     return CONTEXT_DIR / pane_id / f"{session_key}.context"
 
 
+@contextmanager
+def cache_lock():
+    """Serialize cache operations across concurrent Claude hook processes."""
+    CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
+    with (CONTEXT_DIR / ".lock").open("a", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def write_fill(record: Path, level: float) -> None:
     """Atomically write the fill level to one Claude session record."""
     level = max(0.0, min(1.0, level))
-    record.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{record.name}.", dir=record.parent
-    )
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as temporary_file:
-            temporary_file.write(f"{level:.6f}\n")
-        os.replace(temporary_name, record)
-    except Exception:
-        Path(temporary_name).unlink(missing_ok=True)
-        raise
+    with cache_lock():
+        record.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{record.name}.", dir=record.parent
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as temporary_file:
+                temporary_file.write(f"{level:.6f}\n")
+            os.replace(temporary_name, record)
+        except Exception:
+            Path(temporary_name).unlink(missing_ok=True)
+            raise
 
 
 def remove_fill(record: Path) -> None:
     """Remove only this Claude session's cache record."""
-    record.unlink(missing_ok=True)
-    try:
-        record.parent.rmdir()
-    except OSError:
-        # The pane directory is intentionally retained while other sessions use it.
-        pass
+    with cache_lock():
+        record.unlink(missing_ok=True)
+        try:
+            record.parent.rmdir()
+        except OSError as error:
+            if error.errno not in (errno.ENOENT, errno.ENOTEMPTY):
+                raise
 
 
 def pane_fill(record: Path) -> float | None:
     """Return the highest live Claude fill in this Warp pane."""
-    maximum = None
-    try:
-        records = record.parent.glob("*.context")
-        for candidate in records:
-            fill = float(candidate.read_text(encoding="utf-8").strip())
-            fill = max(0.0, min(1.0, fill))
-            maximum = fill if maximum is None else max(maximum, fill)
-    except (OSError, ValueError) as error:
-        raise RuntimeError(f"unable to aggregate context records: {error}") from error
-    return maximum
+    with cache_lock():
+        maximum = None
+        try:
+            records = record.parent.glob("*.context")
+            for candidate in records:
+                fill = float(candidate.read_text(encoding="utf-8").strip())
+                fill = max(0.0, min(1.0, fill))
+                maximum = fill if maximum is None else max(maximum, fill)
+        except (OSError, ValueError) as error:
+            raise RuntimeError(f"unable to aggregate context records: {error}") from error
+        return maximum
 
 
 def cursor_sequence(level: float | None) -> bytes:

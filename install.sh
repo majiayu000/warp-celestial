@@ -16,6 +16,8 @@ BIN_DIR="${HOME}/.local/bin"
 APP_PATH="${APP_DIR}/Warp Celestial.app"
 HOOK_PATH="${INSTALL_ROOT}/claude-token.py"
 LAUNCHER_PATH="${BIN_DIR}/warp-celestial"
+CELESTIAL_PATCH="${SCRIPT_DIR}/patches/celestial-effect.patch"
+LEGACY_CELESTIAL_PATCH="${SCRIPT_DIR}/patches/celestial-effect-v1.patch"
 
 ASSUME_YES=false
 CHECK_ONLY=false
@@ -196,11 +198,26 @@ prepare_warp_source() {
     fail "Managed Warp checkout is at ${current_commit}, expected ${WARP_COMMIT}. Remove ${SOURCE_DIR} to rebuild it."
   fi
 
-  if git -C "$SOURCE_DIR" apply --reverse --check "${SCRIPT_DIR}/patches/celestial-effect.patch"; then
+  if git -C "$SOURCE_DIR" apply --reverse --check "$CELESTIAL_PATCH"; then
     log "Celestial patch is already applied."
-  elif git -C "$SOURCE_DIR" apply --check "${SCRIPT_DIR}/patches/celestial-effect.patch"; then
+  elif git -C "$SOURCE_DIR" apply --check "$CELESTIAL_PATCH"; then
     log "Applying the celestial renderer patch."
-    git -C "$SOURCE_DIR" apply "${SCRIPT_DIR}/patches/celestial-effect.patch"
+    git -C "$SOURCE_DIR" apply "$CELESTIAL_PATCH"
+  elif git -C "$SOURCE_DIR" apply --reverse --check "$LEGACY_CELESTIAL_PATCH"; then
+    log "Upgrading the previous celestial renderer patch in place."
+    git -C "$SOURCE_DIR" apply --reverse "$LEGACY_CELESTIAL_PATCH"
+
+    if ! git -C "$SOURCE_DIR" apply --check "$CELESTIAL_PATCH"; then
+      git -C "$SOURCE_DIR" apply "$LEGACY_CELESTIAL_PATCH" ||
+        fail "Upgrade validation failed and the previous patch could not be restored."
+      fail "Upgrade validation failed; the previous celestial patch was restored."
+    fi
+
+    if ! git -C "$SOURCE_DIR" apply "$CELESTIAL_PATCH"; then
+      git -C "$SOURCE_DIR" apply "$LEGACY_CELESTIAL_PATCH" ||
+        fail "Upgrade failed and the previous patch could not be restored."
+      fail "Upgrade failed; the previous celestial patch was restored."
+    fi
   else
     fail "The managed Warp checkout has unexpected changes. Remove ${SOURCE_DIR} and rerun."
   fi

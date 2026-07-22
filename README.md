@@ -32,6 +32,9 @@ cd warp-celestial
 
 The first build can take 10-30 minutes. The installer explains each long-running
 step and asks before installing build helpers or changing Claude Code settings.
+To upgrade an existing installation, pull the latest repository changes and run
+`./install.sh` again. The installer migrates the previous managed renderer patch
+in place, so the Warp source does not need to be cloned again.
 
 To check the machine without installing anything:
 
