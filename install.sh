@@ -99,6 +99,10 @@ while (($#)); do
   shift
 done
 
+if [[ ! -t 0 && "$ASSUME_YES" != true && "$CHECK_ONLY" != true ]]; then
+  fail "Non-interactive installation requires the explicit --yes option."
+fi
+
 check_command() {
   command -v "$1" >/dev/null 2>&1 || fail "$1 is required. $2"
 }
