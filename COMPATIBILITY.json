@@ -15,6 +15,6 @@
   },
   "cargo_bundle": {
     "repository": "https://github.com/burtonageo/cargo-bundle",
-    "revision": "ae4c76e92c08774bf54ff077b1c52e3d1cd6c16d"
+    "revision": "739f92c37c789b5511a448a389cbc76fcebd99df"
   }
 }

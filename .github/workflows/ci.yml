@@ -18,14 +18,14 @@ jobs:
     name: Installer and context bridge
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.8"
       - name: Validate shell syntax and style
         run: |
-          bash -n install.sh
-          shellcheck install.sh
+          bash -n install.sh scripts/install_safety.sh
+          shellcheck -x install.sh scripts/install_safety.sh
       - name: Validate Python syntax
         run: |
           python -m py_compile \
@@ -47,7 +47,7 @@ jobs:
     name: Standalone Metal proof of concept
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Check and test the locked Rust project
         run: |
           cargo check --locked
@@ -64,11 +64,11 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "10.14"
     steps:
       - name: Check out Warp Celestial
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: warp-celestial
       - name: Check out the tested Warp revision
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: warpdotdev/warp
           ref: 69ce3728acae0b01c2f457b65a90c144664686aa

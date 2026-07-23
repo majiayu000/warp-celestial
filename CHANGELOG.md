@@ -5,19 +5,6 @@ All notable changes to Warp Celestial are documented here. Versions follow
 
 ## [Unreleased]
 
-### Changed
-
-- Added traced photon-sphere caustics and turbulent bright knots to the black
-  hole without increasing the configured geodesic step limits.
-- Added localized magnetic prominence arches to the sun and reduced procedural
-  ember counts to 12/20/28 for low/balanced/high quality.
-- Expanded demo launching to select the effect, quality and fixed context fill,
-  with reproducible English and Chinese capture guides.
-- Made Warp downloads transactional and retry the pinned shallow fetch over
-  HTTP/1.1, preventing a failed network transfer from poisoning later installs.
-
-## [0.1.0] - 2026-07-23
-
 ### Added
 
 - Geodesic-traced black hole with terminal-content lensing, accretion-disk
@@ -30,5 +17,21 @@ All notable changes to Warp Celestial are documented here. Versions follow
 - English and Chinese documentation plus automated installer, patch, Rust and
   Metal validation.
 
-[Unreleased]: https://github.com/majiayu000/warp-celestial/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/majiayu000/warp-celestial/releases/tag/v0.1.0
+### Changed
+
+- Added traced photon-sphere caustics and turbulent bright knots to the black
+  hole without increasing the configured geodesic step limits.
+- Added localized magnetic prominence arches to the sun and reduced procedural
+  ember counts to 12/20/28 for low/balanced/high quality.
+- Expanded demo launching to select the effect, quality and fixed context fill,
+  with reproducible English and Chinese capture guides.
+- Made Warp downloads transactional and retry the pinned shallow fetch over
+  HTTP/1.1, preventing a failed network transfer from poisoning later installs.
+- Bound recursive cleanup to canonical dedicated directories with private
+  ownership markers and negative destructive-path tests.
+- Preserved the latest user status line across reinstall/uninstall cycles and
+  stopped uninstall when an unowned Claude command still references the bridge.
+- Persisted custom context-cache paths for the runtime bridge and moved the
+  verified cargo-bundle revision into the project support directory.
+- Split release verification from write-enabled publication and required the
+  complete Python, Rust, Metal, Warp patch and clippy gates.

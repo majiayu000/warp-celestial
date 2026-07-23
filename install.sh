@@ -4,7 +4,7 @@ set -Eeuo pipefail
 
 WARP_REPOSITORY="https://github.com/warpdotdev/warp.git"
 WARP_COMMIT="69ce3728acae0b01c2f457b65a90c144664686aa"
-CARGO_BUNDLE_REVISION="ae4c76e92c08774bf54ff077b1c52e3d1cd6c16d"
+CARGO_BUNDLE_REVISION="739f92c37c789b5511a448a389cbc76fcebd99df"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_ROOT="${WARP_CELESTIAL_HOME:-${HOME}/.local/share/warp-celestial}"
@@ -12,15 +12,21 @@ APP_DIR="${WARP_CELESTIAL_APP_DIR:-${HOME}/Applications}"
 CLAUDE_SETTINGS="${CLAUDE_SETTINGS_FILE:-${HOME}/.claude/settings.json}"
 SOURCE_DIR="${INSTALL_ROOT}/warp"
 TARGET_DIR="${INSTALL_ROOT}/target"
+CARGO_BUNDLE_ROOT="${INSTALL_ROOT}/cargo-bundle"
 BIN_DIR="${HOME}/.local/bin"
 APP_PATH="${APP_DIR}/Warp Celestial.app"
 HOOK_PATH="${INSTALL_ROOT}/claude-token.py"
 LAUNCHER_IMPL_PATH="${INSTALL_ROOT}/warp_celestial_launcher.py"
 CLAUDE_STATE="${INSTALL_ROOT}/claude-settings-state.json"
 CONTEXT_DIR="${WARP_CELESTIAL_CACHE_DIR:-${HOME}/.cache/warp/blackhole_contexts}"
+CONTEXT_CONFIG_PATH="${INSTALL_ROOT}/context-cache-dir"
 LAUNCHER_PATH="${BIN_DIR}/warp-celestial"
 CELESTIAL_PATCH="${SCRIPT_DIR}/patches/celestial-effect.patch"
 LEGACY_CELESTIAL_PATCH="${SCRIPT_DIR}/patches/celestial-effect-v1.patch"
+INSTALL_MARKER="${INSTALL_ROOT}/.warp-celestial-managed"
+CACHE_MARKER="${CONTEXT_DIR}/.warp-celestial-managed"
+CARGO_BUNDLE_MARKER="${CARGO_BUNDLE_ROOT}/.warp-celestial-revision"
+MANAGED_MARKER_VERSION="warp-celestial-managed-v1"
 
 ASSUME_YES=false
 CHECK_ONLY=false
@@ -166,6 +172,9 @@ check_disk_space() {
     fail "At least 25 GB of free disk space is required for the Warp source and build artifacts."
 }
 
+# shellcheck source=scripts/install_safety.sh
+source "${SCRIPT_DIR}/scripts/install_safety.sh"
+
 install_build_helpers() {
   if ! command -v jq >/dev/null 2>&1; then
     if [[ "$CHECK_ONLY" == true ]]; then
@@ -177,15 +186,18 @@ install_build_helpers() {
     brew install jq
   fi
 
-  if ! cargo bundle --help >/dev/null 2>&1; then
+  if ! installed_cargo_bundle_is_pinned; then
     if [[ "$CHECK_ONLY" == true ]]; then
-      fail "cargo-bundle is missing. Rerun without --check to install the pinned version."
+      fail "The project-local pinned cargo-bundle is missing. Rerun without --check."
     fi
-    confirm "cargo-bundle is required to create the macOS app. Install the pinned version?" ||
+    confirm "Install the project-local pinned cargo-bundle required by Warp?" ||
       fail "Installation cancelled because cargo-bundle is required."
     cargo install cargo-bundle \
+      --force \
+      --root "$CARGO_BUNDLE_ROOT" \
       --git https://github.com/burtonageo/cargo-bundle \
       --rev "$CARGO_BUNDLE_REVISION"
+    printf '%s\n' "$CARGO_BUNDLE_REVISION" >"$CARGO_BUNDLE_MARKER"
   fi
 }
 
@@ -203,6 +215,11 @@ check_prerequisites() {
   check_command ditto "ditto is included with macOS."
   resolve_xcode
   check_disk_space
+  if [[ "$CHECK_ONLY" != true ]]; then
+    prepare_install_root
+  else
+    assert_dedicated_root_path "$INSTALL_ROOT" "warp-celestial"
+  fi
   install_build_helpers
   log "Prerequisites are ready (Xcode: ${DEVELOPER_DIR})."
 }
@@ -286,6 +303,29 @@ run_doctor() {
   else
     doctor_problem "Launcher implementation is missing or not executable."
   fi
+  if [[ -f "$CONTEXT_CONFIG_PATH" ]] &&
+    [[ "$(cat "$CONTEXT_CONFIG_PATH")" == "$CONTEXT_DIR" ]]; then
+    doctor_ok "Context cache configuration matches ${CONTEXT_DIR}."
+  else
+    doctor_problem "Context cache configuration is missing or inconsistent."
+  fi
+  if installed_cargo_bundle_is_pinned; then
+    doctor_ok "Project-local cargo-bundle matches the pinned revision."
+  else
+    doctor_problem "Project-local cargo-bundle is missing or not pinned."
+  fi
+  if [[ -f "$INSTALL_MARKER" ]] &&
+    [[ "$(cat "$INSTALL_MARKER")" == "$(marker_payload "$INSTALL_ROOT")" ]]; then
+    doctor_ok "Installation ownership marker is valid."
+  else
+    doctor_problem "Installation ownership marker is missing or invalid."
+  fi
+  if [[ -f "$CACHE_MARKER" ]] &&
+    [[ "$(cat "$CACHE_MARKER")" == "$(marker_payload "$CONTEXT_DIR")" ]]; then
+    doctor_ok "Context cache ownership marker is valid."
+  else
+    doctor_problem "Context cache ownership marker is missing or invalid."
+  fi
 
   if [[ -e "${SOURCE_DIR}/.git" ]]; then
     commit="$(git -C "$SOURCE_DIR" rev-parse HEAD 2>/dev/null || true)"
@@ -348,16 +388,33 @@ PY
   ((DOCTOR_FAILURES == 0))
 }
 
-assert_safe_removal_path() {
-  local target="$1"
-  [[ "$target" == /* ]] || fail "Refusing to remove a non-absolute path: ${target}"
-  [[ "$target" != "/" && "$target" != "$HOME" && ${#target} -gt 5 ]] ||
-    fail "Refusing to remove unsafe path: ${target}"
+absolute_path() {
+  python3 - "$1" <<'PY'
+import os
+import sys
+
+print(os.path.abspath(os.path.expanduser(sys.argv[1])))
+PY
 }
 
-remove_managed_path() {
+assert_exact_child() {
   local target="$1"
-  assert_safe_removal_path "$target"
+  local parent="$2"
+  local expected_name="$3"
+  local expected
+
+  expected="$(absolute_path "${parent}/${expected_name}")"
+  [[ "$(absolute_path "$target")" == "$expected" ]] ||
+    fail "Refusing to remove unexpected path: ${target}"
+}
+
+remove_owned_root() {
+  local target="$1"
+  local expected_name="$2"
+  local marker="$3"
+
+  assert_dedicated_root_path "$target" "$expected_name"
+  assert_valid_managed_marker "$marker" "$target"
   if [[ -e "$target" || -L "$target" ]]; then
     rm -rf -- "$target"
     log "Removed ${target}."
@@ -366,13 +423,82 @@ remove_managed_path() {
   fi
 }
 
+remove_owned_child() {
+  local target="$1"
+  local parent="$2"
+  local expected_name="$3"
+  local marker="$4"
+
+  assert_valid_managed_marker "$marker" "$parent"
+  assert_exact_child "$target" "$parent" "$expected_name"
+  if [[ -e "$target" || -L "$target" ]]; then
+    rm -rf -- "$target"
+    log "Removed ${target}."
+  else
+    log "Already absent: ${target}."
+  fi
+}
+
+remove_download_stage() {
+  local target="$1"
+  local name
+
+  name="$(basename "$target")"
+  [[ "$name" == .warp-download.* ]] ||
+    fail "Refusing to remove unexpected download staging path: ${target}"
+  remove_owned_child "$target" "$INSTALL_ROOT" "$name" "$INSTALL_MARKER"
+}
+
+settings_reference_hook() {
+  python3 - "$CLAUDE_SETTINGS" "$HOOK_PATH" <<'PY'
+import json
+import shlex
+import sys
+from pathlib import Path
+
+settings = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+command = shlex.quote(str(Path(sys.argv[2]).expanduser().resolve()))
+status = settings.get("statusLine")
+if isinstance(status, dict) and status.get("command") == command:
+    sys.exit(0)
+hooks = settings.get("hooks", {})
+if isinstance(hooks, dict):
+    for matchers in hooks.values():
+        if not isinstance(matchers, list):
+            continue
+        for matcher in matchers:
+            if not isinstance(matcher, dict):
+                continue
+            commands = matcher.get("hooks", [])
+            if any(
+                isinstance(item, dict)
+                and item.get("type") == "command"
+                and item.get("command") == command
+                for item in commands
+            ):
+                sys.exit(0)
+sys.exit(1)
+PY
+}
+
 clean_build_cache() {
+  assert_dedicated_root_path "$INSTALL_ROOT" "warp-celestial"
+  assert_valid_managed_marker "$INSTALL_MARKER" "$INSTALL_ROOT"
   confirm "Remove compiled build artifacts at ${TARGET_DIR}?" no ||
     fail "Build-cache cleanup cancelled."
-  remove_managed_path "$TARGET_DIR"
+  remove_owned_child "$TARGET_DIR" "$INSTALL_ROOT" "target" "$INSTALL_MARKER"
 }
 
 uninstall_all() {
+  assert_dedicated_root_path "$INSTALL_ROOT" "warp-celestial"
+  assert_valid_managed_marker "$INSTALL_MARKER" "$INSTALL_ROOT"
+  assert_exact_child "$APP_PATH" "$APP_DIR" "Warp Celestial.app"
+  assert_exact_child "$LAUNCHER_PATH" "$BIN_DIR" "warp-celestial"
+  if [[ -e "$CONTEXT_DIR" ]]; then
+    assert_dedicated_root_path "$CONTEXT_DIR" "blackhole_contexts"
+    assert_valid_managed_marker "$CACHE_MARKER" "$CONTEXT_DIR"
+  fi
+
   confirm "Remove Warp Celestial and its managed Claude Code integration?" no ||
     fail "Uninstall cancelled."
 
@@ -383,10 +509,22 @@ uninstall_all() {
     log "Claude Code settings are already absent."
   fi
 
-  remove_managed_path "$APP_PATH"
-  remove_managed_path "$LAUNCHER_PATH"
-  remove_managed_path "$CONTEXT_DIR"
-  remove_managed_path "$INSTALL_ROOT"
+  if [[ -f "$CLAUDE_SETTINGS" ]] && settings_reference_hook; then
+    fail "Claude Code still references the bridge. Preserve or remove that pre-existing configuration before uninstalling."
+  fi
+
+  if [[ -e "$APP_PATH" || -L "$APP_PATH" ]]; then
+    rm -rf -- "$APP_PATH"
+    log "Removed ${APP_PATH}."
+  fi
+  if [[ -e "$LAUNCHER_PATH" || -L "$LAUNCHER_PATH" ]]; then
+    rm -f -- "$LAUNCHER_PATH"
+    log "Removed ${LAUNCHER_PATH}."
+  fi
+  if [[ -e "$CONTEXT_DIR" ]]; then
+    remove_owned_root "$CONTEXT_DIR" "blackhole_contexts" "$CACHE_MARKER"
+  fi
+  remove_owned_root "$INSTALL_ROOT" "warp-celestial" "$INSTALL_MARKER"
   log "Warp Celestial was uninstalled. Existing timestamped Claude settings backups were preserved."
 }
 
@@ -404,7 +542,7 @@ prepare_warp_source() {
     if ! git -C "$stage_source" init --quiet ||
       ! git -C "$stage_source" remote add origin "$WARP_REPOSITORY" ||
       ! git -C "$stage_source" config http.version HTTP/1.1; then
-      remove_managed_path "$stage_root"
+      remove_download_stage "$stage_root"
       fail "Could not initialize the temporary Warp checkout."
     fi
 
@@ -417,15 +555,15 @@ prepare_warp_source() {
     done
 
     if [[ "$fetched" != true ]]; then
-      remove_managed_path "$stage_root"
+      remove_download_stage "$stage_root"
       fail "Could not download the tested Warp commit after 3 attempts."
     fi
     if ! git -C "$stage_source" checkout --detach FETCH_HEAD; then
-      remove_managed_path "$stage_root"
+      remove_download_stage "$stage_root"
       fail "Downloaded Warp but could not check out the tested commit."
     fi
     if ! mv "$stage_source" "$SOURCE_DIR"; then
-      remove_managed_path "$stage_root"
+      remove_download_stage "$stage_root"
       fail "Could not move the verified Warp checkout into ${SOURCE_DIR}."
     fi
     rmdir "$stage_root"
@@ -469,6 +607,7 @@ build_app() {
   log "Building Warp Celestial. The first build can take 10-30 minutes and several GB of disk space."
   (
     cd "$SOURCE_DIR"
+    PATH="${CARGO_BUNDLE_ROOT}/bin:${PATH}" \
     CARGO_TARGET_DIR="$TARGET_DIR" \
       WARP_BIN_NAME="warp-oss" \
       WARP_CHANNEL="oss" \
@@ -499,11 +638,13 @@ build_app() {
 }
 
 install_support_files() {
+  prepare_context_root
   mkdir -p "$INSTALL_ROOT" "$BIN_DIR"
   install -m 0755 "${SCRIPT_DIR}/claude-token.py" "$HOOK_PATH"
   install -m 0755 \
     "${SCRIPT_DIR}/scripts/warp_celestial_launcher.py" \
     "$LAUNCHER_IMPL_PATH"
+  (umask 077 && printf '%s\n' "$(canonical_path "$CONTEXT_DIR")" >"$CONTEXT_CONFIG_PATH")
 
   local quoted_app quoted_launcher_impl
   printf -v quoted_app '%q' "$APP_PATH"

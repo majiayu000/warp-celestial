@@ -62,8 +62,8 @@ cd warp-celestial
 ## 安装器具体做什么
 
 1. 检查 macOS、完整 Xcode、Metal 工具、Rust、Python、Git 和磁盘空间。
-2. 缺少 `jq` 时通过 Homebrew 安装，并通过 Cargo 安装 Warp 固定版本的
-   `cargo-bundle`。
+2. 缺少 `jq` 时通过 Homebrew 安装，并通过 Cargo 把 Warp 固定版本的
+   `cargo-bundle` 安装到项目支持目录。
 3. 把经过验证的 Warp 提交 `69ce3728` 克隆到
    `~/.local/share/warp-celestial/warp`。
 4. 应用 `patches/celestial-effect.patch`，构建公开的 OSS 版本；不需要
@@ -82,15 +82,16 @@ cd warp-celestial
 
 ## Release 与兼容性
 
-当前源码版本为 `v0.1.0`。`COMPATIBILITY.json` 是项目版本、Warp 提交、renderer
-补丁摘要、Rust 工具链及 bundler revision 的机器可检查事实源。CI 会拒绝该清单
-与 `VERSION`、`install.sh` 或补丁内容发生漂移。每周的只读检查还会报告当前补丁
-能否直接应用到公开 Warp `master` 最新提交。
+当前项目版本为 `0.1.0`，但尚未发布 GitHub Release。`COMPATIBILITY.json` 是
+项目版本、Warp 提交、renderer 补丁摘要、Rust 工具链及 bundler revision 的机器
+可检查事实源。CI 会拒绝该清单与 `VERSION`、`install.sh` 或补丁内容发生漂移。
+每周的只读检查还会报告当前补丁能否直接应用到公开 Warp `master` 最新提交。
 
-Release 提供源码包及 SHA-256 校验值，目前不提供预编译应用。本地构建采用 ad-hoc
-签名；要发布可信二进制，还需要 Apple Developer 签名、公证，以及与二进制对应的
-AGPL 源码分发。仓库采用 AGPL-3.0，适配自 MIT 项目的部分继续记录在
-`THIRD_PARTY_NOTICES.md`。
+后续从 `master` 创建受控的 `v0.1.0` 标签时，Release workflow 会重新执行完整的
+Python、Rust、Metal、Warp patch 与 clippy 门禁，再发布源码包和 SHA-256 校验值。
+它不会发布预编译应用。本地构建采用 ad-hoc 签名；要发布可信二进制，还需要 Apple
+Developer 签名、公证，以及与二进制对应的 AGPL 源码分发。仓库采用 AGPL-3.0，
+适配自 MIT 项目的部分继续记录在 `THIRD_PARTY_NOTICES.md`。
 
 ## 如何运行
 
@@ -223,7 +224,7 @@ git apply /path/to/warp-celestial/patches/celestial-effect.patch
 
 cargo install cargo-bundle \
   --git https://github.com/burtonageo/cargo-bundle \
-  --rev ae4c76e92c08774bf54ff077b1c52e3d1cd6c16d
+  --rev 739f92c37c789b5511a448a389cbc76fcebd99df
 
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 export WARP_BIN_NAME=warp-oss
@@ -306,6 +307,11 @@ find ~/.cache/warp/blackhole_contexts -maxdepth 3 -name '*.context' -print -exec
 Celestial 管理时才会恢复旧值；安装后用户自行修改的值会保留。带时间戳的 Claude
 配置备份不会被删除。
 
+递归删除必须存在绑定到规范路径的私有 ownership marker。自定义支持目录和缓存
+目录必须位于 `HOME` 下，并分别以 `warp-celestial`、`blackhole_contexts` 结尾；
+宽泛路径或未受管理的路径会被拒绝。如果某项既有 Claude 配置仍引用 bridge、但从未
+由 Warp Celestial 接管，卸载器会停止并保留 bridge，不会留下失效命令。
+
 如果只想释放 Cargo 编译目录占用的空间，同时保留已安装应用：
 
 ```bash
@@ -321,6 +327,7 @@ Celestial 管理时才会恢复旧值；安装后用户自行修改的值会保�
 | `CHANGELOG.md` | 版本变更记录 |
 | `scripts/configure_claude.py` | 原子且保留既有内容地更新 Claude Code 配置 |
 | `scripts/check_compatibility.py` | Release 与安装器固定版本一致性检查 |
+| `scripts/install_safety.sh` | 管理目录的所有权与安全删除保护 |
 | `scripts/warp_celestial_launcher.py` | 校验效果、画质和演示参数的启动器 |
 | `patches/celestial-effect.patch` | 完整 Warp 源码补丁 |
 | `claude-token.py` | Claude Code 上下文到渲染器的桥接脚本 |

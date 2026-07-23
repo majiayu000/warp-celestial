@@ -67,7 +67,7 @@ Useful options:
 
 1. Verifies macOS, full Xcode, Metal tools, Rust, Python, Git and disk space.
 2. Installs `jq` through Homebrew when needed and installs Warp's pinned
-   `cargo-bundle` version through Cargo.
+   `cargo-bundle` into the project support directory through Cargo.
 3. Clones Warp at the tested commit `69ce3728` into
    `~/.local/share/warp-celestial/warp`.
 4. Applies `patches/celestial-effect.patch` and builds the public OSS app. No
@@ -88,18 +88,20 @@ stops instead of resetting or deleting the checkout.
 
 ## Releases and compatibility
 
-The current source release is `v0.1.0`. `COMPATIBILITY.json` is the
-machine-checked source of truth for the project version, Warp commit, renderer
-patch digest, Rust toolchain and bundler revision. CI rejects drift between that
-manifest, `VERSION`, `install.sh` and the patch itself. A weekly non-mutating
-probe reports whether the same patch still applies to the latest public Warp
-`master`.
+The current project version is `0.1.0`; no GitHub release has been published
+yet. `COMPATIBILITY.json` is the machine-checked source of truth for the project
+version, Warp commit, renderer patch digest, Rust toolchain and bundler
+revision. CI rejects drift between that manifest, `VERSION`, `install.sh` and
+the patch itself. A weekly non-mutating probe reports whether the same patch
+still applies to the latest public Warp `master`.
 
-Releases contain source and a SHA-256 checksum. They do not currently contain a
-prebuilt app: local builds are ad-hoc signed, and publishing a trusted binary
-requires an Apple Developer signing identity, notarization and the corresponding
-AGPL source distribution. The repository is licensed under AGPL-3.0; adapted
-MIT work remains identified in `THIRD_PARTY_NOTICES.md`.
+After a controlled `v0.1.0` tag is created from `master`, the release workflow
+reruns the complete Python, Rust, Metal, Warp patch and clippy gates before
+publishing source plus a SHA-256 checksum. It does not publish a prebuilt app:
+local builds are ad-hoc signed, and publishing a trusted binary requires an
+Apple Developer signing identity, notarization and the corresponding AGPL
+source distribution. The repository is licensed under AGPL-3.0; adapted MIT
+work remains identified in `THIRD_PARTY_NOTICES.md`.
 
 ## Running it
 
@@ -247,7 +249,7 @@ git apply /path/to/warp-celestial/patches/celestial-effect.patch
 
 cargo install cargo-bundle \
   --git https://github.com/burtonageo/cargo-bundle \
-  --rev ae4c76e92c08774bf54ff077b1c52e3d1cd6c16d
+  --rev 739f92c37c789b5511a448a389cbc76fcebd99df
 
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 export WARP_BIN_NAME=warp-oss
@@ -335,6 +337,13 @@ If the installer replaced an earlier status line, it restores that value only
 when the current value is still managed by Warp Celestial; later user edits are
 left untouched. Timestamped Claude settings backups are preserved.
 
+Recursive removal requires a private ownership marker bound to the canonical
+directory. Custom support/cache roots must stay below `HOME` and end in
+`warp-celestial`/`blackhole_contexts`; broad or unowned paths are rejected. If a
+pre-existing Claude configuration still references the bridge but was never
+claimed by Warp Celestial, uninstall stops and preserves the bridge instead of
+leaving a broken command.
+
 To keep the installed app but reclaim the large Cargo build directory:
 
 ```bash
@@ -350,6 +359,7 @@ To keep the installed app but reclaim the large Cargo build directory:
 | `CHANGELOG.md` | Release history |
 | `scripts/configure_claude.py` | Atomic, preserving update of Claude Code settings |
 | `scripts/check_compatibility.py` | Release and installer pin consistency checks |
+| `scripts/install_safety.sh` | Managed-directory ownership and removal guards |
 | `scripts/warp_celestial_launcher.py` | Validated effect, quality and demo launcher |
 | `patches/celestial-effect.patch` | Complete Warp source patch |
 | `claude-token.py` | Claude Code context-to-renderer bridge |

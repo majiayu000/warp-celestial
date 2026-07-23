@@ -137,6 +137,87 @@ class ConfigureClaudeTests(unittest.TestCase):
             )
             self.assertNotIn("hooks", updated)
 
+    def test_reinstall_restores_the_latest_user_status_line_on_uninstall(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = Path(directory) / "settings.json"
+            state_path = Path(directory) / "install-state.json"
+            hook_path = Path(directory) / "claude-token.py"
+            settings_path.write_text(
+                json.dumps(
+                    {"statusLine": {"type": "command", "command": "before-install"}}
+                ),
+                encoding="utf-8",
+            )
+
+            configure_claude.configure(settings_path, hook_path, state_path)
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+            settings["statusLine"] = {
+                "type": "command",
+                "command": "changed-after-install",
+            }
+            settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+            configure_claude.configure(settings_path, hook_path, state_path)
+            configure_claude.unconfigure(settings_path, hook_path, state_path)
+
+            updated = json.loads(settings_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                updated["statusLine"],
+                {"type": "command", "command": "changed-after-install"},
+            )
+
+    def test_matching_configuration_without_state_is_not_claimed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = Path(directory) / "settings.json"
+            state_path = Path(directory) / "install-state.json"
+            hook_path = Path(directory) / "claude-token.py"
+            command = shlex.quote(str(hook_path.resolve()))
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "statusLine": {"type": "command", "command": command},
+                        "hooks": {
+                            event: [
+                                {
+                                    "hooks": [
+                                        {"type": "command", "command": command}
+                                    ]
+                                }
+                            ]
+                            for event in configure_claude.LIFECYCLE_EVENTS
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            changed, backup = configure_claude.configure(
+                settings_path, hook_path, state_path
+            )
+            removed, _ = configure_claude.unconfigure(
+                settings_path, hook_path, state_path
+            )
+
+            self.assertFalse(changed)
+            self.assertIsNone(backup)
+            self.assertFalse(removed)
+            self.assertEqual(
+                json.loads(settings_path.read_text(encoding="utf-8")),
+                {
+                    "statusLine": {"type": "command", "command": command},
+                    "hooks": {
+                        event: [
+                            {
+                                "hooks": [
+                                    {"type": "command", "command": command}
+                                ]
+                            }
+                        ]
+                        for event in configure_claude.LIFECYCLE_EVENTS
+                    },
+                },
+            )
+
     def test_unconfigure_does_not_remove_preexisting_matching_hook(self):
         with tempfile.TemporaryDirectory() as directory:
             settings_path = Path(directory) / "settings.json"

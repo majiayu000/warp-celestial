@@ -101,47 +101,75 @@ def configure(
     previous_status_line = data.get("statusLine")
     status_line_changed = previous_status_line != desired_status_line
 
-    changed = status_line_changed
+    existing_state = (
+        read_state(state_path) if state_path is not None and state_path.exists() else None
+    )
+    if existing_state and existing_state["managed_command"] != hook_command:
+        raise ValueError(
+            f"Warp Celestial state in {state_path} belongs to a different command"
+        )
+
+    settings_changed = status_line_changed
     data["statusLine"] = desired_status_line
     added_events = []
     for event in LIFECYCLE_EVENTS:
         added = ensure_lifecycle_hook(data, event, hook_command)
         if added:
             added_events.append(event)
-        changed = added or changed
+        settings_changed = added or settings_changed
 
-    if not changed:
-        if state_path is not None and not state_path.exists():
-            write_json_atomic(
-                state_path,
-                {
-                    "version": STATE_VERSION,
-                    "managed_command": hook_command,
-                    "status_line_changed": False,
-                    "status_line_existed": status_line_existed,
-                    "previous_status_line": previous_status_line,
-                    "added_events": [],
-                },
-            )
-        return False, None
-
-    backup = backup_settings(settings_path)
-    write_json_atomic(settings_path, data, mode)
-
-    if state_path is not None and not state_path.exists():
-        write_json_atomic(
-            state_path,
-            {
+    state = None
+    state_changed = False
+    if state_path is not None:
+        if existing_state is None:
+            state = {
                 "version": STATE_VERSION,
                 "managed_command": hook_command,
                 "status_line_changed": status_line_changed,
                 "status_line_existed": status_line_existed,
                 "previous_status_line": previous_status_line,
                 "added_events": added_events,
-            },
-        )
+            }
+        else:
+            state = dict(existing_state)
+            if status_line_changed:
+                # The user changed statusLine after an earlier install. This
+                # reinstall is a new takeover, so uninstall must restore the
+                # value being replaced now, not the value from the first run.
+                state["status_line_changed"] = True
+                state["status_line_existed"] = status_line_existed
+                state["previous_status_line"] = previous_status_line
+            owned_events = [
+                event
+                for event in state.get("added_events", [])
+                if event in LIFECYCLE_EVENTS
+            ]
+            for event in added_events:
+                if event not in owned_events:
+                    owned_events.append(event)
+            state["added_events"] = owned_events
+        state_changed = state != existing_state
 
-    return True, backup
+    if not settings_changed and not state_changed:
+        return False, None
+
+    backup = backup_settings(settings_path) if settings_changed else None
+    if settings_changed:
+        write_json_atomic(settings_path, data, mode)
+
+    if state_path is not None and state_changed:
+        try:
+            assert state is not None
+            write_json_atomic(state_path, state)
+        except Exception:
+            if settings_changed:
+                if backup is not None:
+                    shutil.copy2(backup, settings_path)
+                else:
+                    settings_path.unlink(missing_ok=True)
+            raise
+
+    return settings_changed, backup
 
 
 def remove_command_hook(settings: dict, event: str, command: str) -> bool:
@@ -199,6 +227,15 @@ def read_state(state_path: Path) -> dict:
         raise ValueError(f"Unsupported Warp Celestial state in {state_path}")
     if not isinstance(state.get("managed_command"), str):
         raise ValueError(f"Missing managed command in {state_path}")
+    if not isinstance(state.get("status_line_changed"), bool):
+        raise ValueError(f"Invalid status-line ownership in {state_path}")
+    if not isinstance(state.get("status_line_existed"), bool):
+        raise ValueError(f"Invalid previous status-line state in {state_path}")
+    added_events = state.get("added_events")
+    if not isinstance(added_events, list) or not all(
+        isinstance(event, str) for event in added_events
+    ):
+        raise ValueError(f"Invalid lifecycle-hook ownership in {state_path}")
     return state
 
 

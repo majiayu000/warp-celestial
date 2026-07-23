@@ -43,7 +43,33 @@ from typing import Optional
 
 # Cache directory. Override it when testing or when Warp uses a nonstandard home.
 DEFAULT_CONTEXT_DIR = Path.home() / ".cache" / "warp" / "blackhole_contexts"
-CONTEXT_DIR = Path(os.environ.get("BLACKHOLE_CONTEXT_DIR", DEFAULT_CONTEXT_DIR))
+CONTEXT_CONFIG_PATH = Path(__file__).resolve().with_name("context-cache-dir")
+
+
+def configured_context_dir() -> Path:
+    """Resolve the explicit, installed, or default context cache directory."""
+    explicit = os.environ.get("BLACKHOLE_CONTEXT_DIR") or os.environ.get(
+        "WARP_CELESTIAL_CACHE_DIR"
+    )
+    if explicit:
+        return Path(explicit).expanduser()
+    try:
+        configured = CONTEXT_CONFIG_PATH.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return DEFAULT_CONTEXT_DIR
+    except OSError as error:
+        raise RuntimeError(
+            f"unable to read context cache configuration: {error}"
+        ) from error
+    configured_path = Path(configured).expanduser()
+    if not configured or not configured_path.is_absolute():
+        raise RuntimeError(
+            f"invalid context cache configuration in {CONTEXT_CONFIG_PATH}"
+        )
+    return configured_path
+
+
+CONTEXT_DIR = configured_context_dir()
 
 # Cursor-channel encoding adapted from s0xDk/ghostty-blackhole (MIT).
 # The high nibbles are a signature; the low nibbles hold a quantized fill and

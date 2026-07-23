@@ -20,7 +20,8 @@ attaching screenshots.
 For installer or context-bridge changes:
 
 ```bash
-bash -n install.sh
+bash -n install.sh scripts/install_safety.sh
+shellcheck -x install.sh scripts/install_safety.sh
 python3 scripts/check_compatibility.py
 python3 -m unittest discover -s tests -v
 ```
