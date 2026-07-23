@@ -30,10 +30,14 @@ jobs:
         run: |
           python -m py_compile \
             claude-token.py \
+            scripts/check_compatibility.py \
             scripts/configure_claude.py \
             tests/test_claude_token.py \
+            tests/test_compatibility.py \
             tests/test_configure_claude.py \
             tests/test_install_script.py
+      - name: Validate release compatibility manifest
+        run: python scripts/check_compatibility.py
       - name: Run Python tests
         run: python -m unittest discover -s tests -v
 

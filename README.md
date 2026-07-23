@@ -81,6 +81,21 @@ The installer is repeatable. Running it again reuses the pinned source checkout
 and Cargo build cache. If it cannot verify the pinned commit and patch state, it
 stops instead of resetting or deleting the checkout.
 
+## Releases and compatibility
+
+The current source release is `v0.1.0`. `COMPATIBILITY.json` is the
+machine-checked source of truth for the project version, Warp commit, renderer
+patch digest, Rust toolchain and bundler revision. CI rejects drift between that
+manifest, `VERSION`, `install.sh` and the patch itself. A weekly non-mutating
+probe reports whether the same patch still applies to the latest public Warp
+`master`.
+
+Releases contain source and a SHA-256 checksum. They do not currently contain a
+prebuilt app: local builds are ad-hoc signed, and publishing a trusted binary
+requires an Apple Developer signing identity, notarization and the corresponding
+AGPL source distribution. The repository is licensed under AGPL-3.0; adapted
+MIT work remains identified in `THIRD_PARTY_NOTICES.md`.
+
 ## Running it
 
 Restart Claude Code after the first installation so it reloads the status-line
@@ -314,7 +329,10 @@ To keep the installed app but reclaim the large Cargo build directory:
 | Path | Purpose |
 | --- | --- |
 | `install.sh` | Preflight, build, app installation and safe Claude configuration |
+| `COMPATIBILITY.json` | Machine-checked Warp, patch and toolchain compatibility |
+| `CHANGELOG.md` | Release history |
 | `scripts/configure_claude.py` | Atomic, preserving update of Claude Code settings |
+| `scripts/check_compatibility.py` | Release and installer pin consistency checks |
 | `patches/celestial-effect.patch` | Complete Warp source patch |
 | `claude-token.py` | Claude Code context-to-renderer bridge |
 | `THIRD_PARTY_NOTICES.md` | Attribution and MIT notice for adapted work |
@@ -329,7 +347,7 @@ To keep the installed app but reclaim the large Cargo build directory:
 - The patch is pinned to Warp commit `69ce3728`; newer Warp revisions may need a
   rebase.
 - The locally built OSS app is ad-hoc signed, not Apple-notarized.
-- Warp is AGPL-3.0. The patch is intended to be applied to and distributed with
-  Warp under the same license obligations.
+- Warp Celestial and the patched Warp derivative are distributed under
+  AGPL-3.0; see `LICENSE`.
 - The geodesic renderer and cursor-channel protocol retain the upstream MIT
   attribution documented in `THIRD_PARTY_NOTICES.md`.

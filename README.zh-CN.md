@@ -76,6 +76,18 @@ cd warp-celestial
 安装器支持重复运行，会复用固定版本的源码和 Cargo 编译缓存。如果无法验证
 固定提交和补丁状态，它会停止并报告，不会 reset 或删除源码目录。
 
+## Release 与兼容性
+
+当前源码版本为 `v0.1.0`。`COMPATIBILITY.json` 是项目版本、Warp 提交、renderer
+补丁摘要、Rust 工具链及 bundler revision 的机器可检查事实源。CI 会拒绝该清单
+与 `VERSION`、`install.sh` 或补丁内容发生漂移。每周的只读检查还会报告当前补丁
+能否直接应用到公开 Warp `master` 最新提交。
+
+Release 提供源码包及 SHA-256 校验值，目前不提供预编译应用。本地构建采用 ad-hoc
+签名；要发布可信二进制，还需要 Apple Developer 签名、公证，以及与二进制对应的
+AGPL 源码分发。仓库采用 AGPL-3.0，适配自 MIT 项目的部分继续记录在
+`THIRD_PARTY_NOTICES.md`。
+
 ## 如何运行
 
 首次安装后请重启 Claude Code，使其重新读取 `statusLine` 配置。之后可以从
@@ -288,7 +300,10 @@ Celestial 管理时才会恢复旧值；安装后用户自行修改的值会保�
 | 路径 | 用途 |
 | --- | --- |
 | `install.sh` | 环境预检、构建、应用安装和安全配置 Claude Code |
+| `COMPATIBILITY.json` | 可机器检查的 Warp、补丁和工具链兼容性清单 |
+| `CHANGELOG.md` | 版本变更记录 |
 | `scripts/configure_claude.py` | 原子且保留既有内容地更新 Claude Code 配置 |
+| `scripts/check_compatibility.py` | Release 与安装器固定版本一致性检查 |
 | `patches/celestial-effect.patch` | 完整 Warp 源码补丁 |
 | `claude-token.py` | Claude Code 上下文到渲染器的桥接脚本 |
 | `THIRD_PARTY_NOTICES.md` | 所适配上游工作的归属与 MIT 声明 |
@@ -302,6 +317,7 @@ Celestial 管理时才会恢复旧值；安装后用户自行修改的值会保�
 - 当前只支持 macOS Metal。
 - 补丁固定对应 Warp 提交 `69ce3728`，更新的 Warp 版本可能需要重新适配。
 - 本地构建的 OSS 应用采用 ad-hoc 签名，没有经过 Apple 公证。
-- Warp 使用 AGPL-3.0；本补丁应按照相同许可证义务应用并随 Warp 分发。
+- Warp Celestial 与打过补丁的 Warp 衍生版本均以 AGPL-3.0 分发，详见
+  `LICENSE`。
 - 测地线渲染器与光标通道协议保留了 `THIRD_PARTY_NOTICES.md` 中记录的上游
   MIT 归属。
