@@ -88,6 +88,8 @@ jobs:
           xcrun -sdk macosx metallib \
             "$RUNNER_TEMP/warp-celestial.air" \
             -o "$RUNNER_TEMP/warp-celestial.metallib"
+      - name: Install protobuf compiler
+        run: brew install protobuf
       - name: Run focused renderer tests
         working-directory: warp
         run: |

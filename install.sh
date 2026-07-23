@@ -227,20 +227,26 @@ doctor_problem() {
 run_doctor() {
   local selected commit
 
-  [[ "$(uname -s)" == Darwin ]] &&
-    doctor_ok "macOS is supported." ||
+  if [[ "$(uname -s)" == Darwin ]]; then
+    doctor_ok "macOS is supported."
+  else
     doctor_problem "This project currently supports macOS only."
+  fi
 
   for command_name in git python3 cargo rustc xcode-select xcrun xcodebuild ditto; do
-    command -v "$command_name" >/dev/null 2>&1 &&
-      doctor_ok "${command_name} is available." ||
+    if command -v "$command_name" >/dev/null 2>&1; then
+      doctor_ok "${command_name} is available."
+    else
       doctor_problem "${command_name} is missing."
+    fi
   done
 
   if command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' &&
-      doctor_ok "Python is 3.8 or newer." ||
+    if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)'; then
+      doctor_ok "Python is 3.8 or newer."
+    else
       doctor_problem "Python 3.8 or newer is required."
+    fi
   fi
 
   selected="${DEVELOPER_DIR:-$(xcode-select -p 2>/dev/null || true)}"
@@ -260,24 +266,34 @@ run_doctor() {
     doctor_problem "The full Xcode app is not available."
   fi
 
-  [[ -d "$APP_PATH" ]] &&
-    doctor_ok "App bundle exists at ${APP_PATH}." ||
+  if [[ -d "$APP_PATH" ]]; then
+    doctor_ok "App bundle exists at ${APP_PATH}."
+  else
     doctor_problem "App bundle is missing at ${APP_PATH}."
-  [[ -x "$LAUNCHER_PATH" ]] &&
-    doctor_ok "Launcher is executable at ${LAUNCHER_PATH}." ||
+  fi
+  if [[ -x "$LAUNCHER_PATH" ]]; then
+    doctor_ok "Launcher is executable at ${LAUNCHER_PATH}."
+  else
     doctor_problem "Launcher is missing or not executable at ${LAUNCHER_PATH}."
-  [[ -x "$HOOK_PATH" ]] &&
-    doctor_ok "Context bridge is executable at ${HOOK_PATH}." ||
+  fi
+  if [[ -x "$HOOK_PATH" ]]; then
+    doctor_ok "Context bridge is executable at ${HOOK_PATH}."
+  else
     doctor_problem "Context bridge is missing or not executable at ${HOOK_PATH}."
-  [[ -x "$LAUNCHER_IMPL_PATH" ]] &&
-    doctor_ok "Launcher implementation is executable." ||
+  fi
+  if [[ -x "$LAUNCHER_IMPL_PATH" ]]; then
+    doctor_ok "Launcher implementation is executable."
+  else
     doctor_problem "Launcher implementation is missing or not executable."
+  fi
 
   if [[ -e "${SOURCE_DIR}/.git" ]]; then
     commit="$(git -C "$SOURCE_DIR" rev-parse HEAD 2>/dev/null || true)"
-    [[ "$commit" == "$WARP_COMMIT" ]] &&
-      doctor_ok "Managed Warp source is at the tested commit." ||
+    if [[ "$commit" == "$WARP_COMMIT" ]]; then
+      doctor_ok "Managed Warp source is at the tested commit."
+    else
       doctor_problem "Managed Warp source is at ${commit:-an unreadable commit}."
+    fi
     if git -C "$SOURCE_DIR" apply --reverse --check "$CELESTIAL_PATCH" >/dev/null 2>&1; then
       doctor_ok "Current celestial renderer patch is applied."
     elif git -C "$SOURCE_DIR" apply --reverse --check "$LEGACY_CELESTIAL_PATCH" >/dev/null 2>&1; then
