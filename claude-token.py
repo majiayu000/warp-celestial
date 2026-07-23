@@ -39,6 +39,7 @@ import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Optional
 
 # Cache directory. Override it when testing or when Warp uses a nonstandard home.
 DEFAULT_CONTEXT_DIR = Path.home() / ".cache" / "warp" / "blackhole_contexts"
@@ -70,7 +71,7 @@ def context_fill(data: dict) -> float:
     return 0.0
 
 
-def context_record(data: dict) -> Path | None:
+def context_record(data: dict) -> Optional[Path]:
     """Return the safe cache record for this Warp pane and Claude session."""
     pane_id = os.environ.get("WARP_TERMINAL_SESSION_UUID", "").lower()
     session_id = data.get("session_id")
@@ -127,7 +128,7 @@ def remove_fill(record: Path) -> None:
                 raise
 
 
-def _pane_fill_unlocked(record: Path) -> float | None:
+def _pane_fill_unlocked(record: Path) -> Optional[float]:
     maximum = None
     try:
         records = record.parent.glob("*.context")
@@ -140,13 +141,13 @@ def _pane_fill_unlocked(record: Path) -> float | None:
     return maximum
 
 
-def pane_fill(record: Path) -> float | None:
+def pane_fill(record: Path) -> Optional[float]:
     """Return the highest live Claude fill in this Warp pane."""
     with cache_lock(record):
         return _pane_fill_unlocked(record)
 
 
-def cursor_sequence(level: float | None) -> bytes:
+def cursor_sequence(level: Optional[float]) -> bytes:
     """Encode a fill as OSC 12, or reset the cursor with OSC 112."""
     if level is None:
         return b"\033]112\007"
@@ -161,7 +162,7 @@ def cursor_sequence(level: float | None) -> bytes:
     return b"\033]12;#%02x%02x%02x\007" % rgb
 
 
-def session_tty() -> Path | None:
+def session_tty() -> Optional[Path]:
     """Find the terminal inherited by Claude when hooks have no controlling tty."""
     process_id = os.getppid()
     for _ in range(10):
@@ -187,7 +188,7 @@ def session_tty() -> Path | None:
     return None
 
 
-def emit_cursor(level: float | None) -> bool:
+def emit_cursor(level: Optional[float]) -> bool:
     """Write the pane-local fill directly to its terminal cursor state."""
     sequence = cursor_sequence(level)
     errors = []

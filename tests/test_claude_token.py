@@ -148,15 +148,13 @@ class ContextFileTests(unittest.TestCase):
             record = Path(directory) / "pane" / "session.context"
             record.parent.mkdir()
             record.write_text("0.75\n", encoding="utf-8")
-            with (
-                mock.patch.object(claude_token, "cache_lock", observed_lock),
-                mock.patch.object(
+            with mock.patch.object(claude_token, "cache_lock", observed_lock):
+                with mock.patch.object(
                     claude_token,
                     "emit_cursor",
                     side_effect=lambda fill: events.append(("emit", fill)) or True,
-                ),
-            ):
-                self.assertTrue(claude_token.sync_cursor(record))
+                ):
+                    self.assertTrue(claude_token.sync_cursor(record))
 
         self.assertEqual(events, ["locked", ("emit", 0.75), "unlocked"])
 
@@ -181,7 +179,10 @@ class ContextFileTests(unittest.TestCase):
 class CursorChannelTests(unittest.TestCase):
     def test_cursor_sequence_round_trips_fill_and_checksum(self):
         sequence = claude_token.cursor_sequence(0.8)
-        encoded = sequence.removeprefix(b"\033]12;#").removesuffix(b"\007")
+        prefix = b"\033]12;#"
+        self.assertTrue(sequence.startswith(prefix))
+        self.assertTrue(sequence.endswith(b"\007"))
+        encoded = sequence[len(prefix) : -1]
         red, green, blue = bytes.fromhex(encoded.decode("ascii"))
         high = green & 0xF
         low = blue & 0xF
@@ -197,11 +198,9 @@ class CursorChannelTests(unittest.TestCase):
 
     def test_emit_cursor_uses_controlling_tty_without_process_scan(self):
         terminal = mock.mock_open()
-        with (
-            mock.patch.object(Path, "open", terminal),
-            mock.patch.object(claude_token, "session_tty") as session_tty,
-        ):
-            self.assertTrue(claude_token.emit_cursor(0.5))
+        with mock.patch.object(Path, "open", terminal):
+            with mock.patch.object(claude_token, "session_tty") as session_tty:
+                self.assertTrue(claude_token.emit_cursor(0.5))
 
         session_tty.assert_not_called()
         terminal().write.assert_called_once_with(claude_token.cursor_sequence(0.5))
