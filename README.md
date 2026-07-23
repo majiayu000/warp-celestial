@@ -113,12 +113,17 @@ configuration. Then open `Warp Celestial.app` from `~/Applications`, or use:
 ~/.local/bin/warp-celestial sun
 ```
 
-The optional second argument selects the GPU cost: `low` (24 trace steps),
-`balanced` (36, the default), or `high` (48). For example:
+The optional second argument selects the GPU cost: `auto` (the default, choosing
+24/36/48 trace steps from the current context fill), `low` (fixed 24),
+`balanced` (fixed 36), or `high` (fixed 48). For example:
 
 ```bash
 ~/.local/bin/warp-celestial blackhole low
 ```
+
+`auto` uses 24 steps below 35% context fill, 36 steps from 35% to below 75%,
+and 48 steps at 75% or above. Demo mode still defaults to `high` so captures are
+visually consistent.
 
 The default is `blackhole`. The effect is intentionally hidden when Claude Code
 reports no active context usage. To preview it without waiting for a session:
@@ -222,9 +227,10 @@ effect adds a full-screen pass, and pixels near the hole integrate 24-48 ray
 steps. Pixels in the protected bottom work area exit early; distant pixels use
 a cheaper analytic approximation. Larger Retina windows and high-refresh-rate
 displays cost more. Sun particles are capped at 12, 20 or 28 for low, balanced
-or high quality and are evaluated only close to the star. Use `low` on a laptop
-or `high` for recordings; close the custom app or end the focused Claude
-session to stop continuous rendering.
+or high quality and are evaluated only close to the star. Normal use defaults
+to `auto`; choose `low` to prioritize battery life or `high` for recordings.
+Close the custom app or end the focused Claude session to stop continuous
+rendering.
 
 ### Tabs, panes and concurrent sessions
 

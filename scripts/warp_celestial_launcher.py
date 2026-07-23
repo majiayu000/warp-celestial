@@ -8,10 +8,10 @@ from typing import List, NamedTuple, Optional, Sequence
 
 
 EFFECTS = ("blackhole", "sun")
-QUALITIES = ("low", "balanced", "high")
+QUALITIES = ("auto", "low", "balanced", "high")
 USAGE = """Usage:
-  warp-celestial [blackhole|sun] [low|balanced|high]
-  warp-celestial --demo [blackhole|sun] [low|balanced|high] [0.0-1.0]
+  warp-celestial [blackhole|sun] [auto|low|balanced|high]
+  warp-celestial --demo [blackhole|sun] [auto|low|balanced|high] [0.0-1.0]
 """
 
 
@@ -34,13 +34,13 @@ def parse_fill(value: str) -> float:
 def parse_arguments(arguments: Sequence[str]) -> LaunchConfig:
     remaining = list(arguments)
     if not remaining:
-        return LaunchConfig("blackhole", "balanced", None)
+        return LaunchConfig("blackhole", "auto", None)
 
     if remaining[0] != "--demo":
         effect = remaining.pop(0)
         if effect not in EFFECTS:
             raise ValueError(f"unknown effect: {effect}")
-        quality = remaining.pop(0) if remaining else "balanced"
+        quality = remaining.pop(0) if remaining else "auto"
         if quality not in QUALITIES:
             raise ValueError(f"unknown quality: {quality}")
         if remaining:

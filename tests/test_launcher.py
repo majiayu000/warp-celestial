@@ -18,11 +18,19 @@ class LauncherTests(unittest.TestCase):
     def test_normal_launch_defaults_and_quality(self):
         self.assertEqual(
             launcher.parse_arguments([]),
-            launcher.LaunchConfig("blackhole", "balanced", None),
+            launcher.LaunchConfig("blackhole", "auto", None),
         )
         self.assertEqual(
             launcher.parse_arguments(["sun", "low"]),
             launcher.LaunchConfig("sun", "low", None),
+        )
+        self.assertEqual(
+            launcher.parse_arguments(["sun"]),
+            launcher.LaunchConfig("sun", "auto", None),
+        )
+        self.assertEqual(
+            launcher.parse_arguments(["blackhole", "balanced"]),
+            launcher.LaunchConfig("blackhole", "balanced", None),
         )
 
     def test_demo_selects_effect_quality_and_fill(self):
@@ -33,6 +41,10 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(
             launcher.parse_arguments(["--demo", "low"]),
             launcher.LaunchConfig("blackhole", "low", 0.65),
+        )
+        self.assertEqual(
+            launcher.parse_arguments(["--demo"]),
+            launcher.LaunchConfig("blackhole", "high", 0.65),
         )
 
     def test_demo_rejects_invalid_fill_and_extra_arguments(self):

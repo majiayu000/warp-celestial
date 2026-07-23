@@ -306,7 +306,7 @@ index f10adef61..66a210c4a 100644
      command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
 +    start_time: Instant,
 +    celestial: CelestialState,
-+    celestial_trace_steps: u32,
++    celestial_quality: CelestialQuality,
 +    celestial_demo_fill: Option<f32>,
  }
  
@@ -351,12 +351,12 @@ index f10adef61..66a210c4a 100644
          let glyph_cache = GlyphCache::new(glyph_config);
  
 +        let quality_name =
-+            std::env::var("WARP_CELESTIAL_QUALITY").unwrap_or_else(|_| "balanced".to_string());
++            std::env::var("WARP_CELESTIAL_QUALITY").unwrap_or_else(|_| "auto".to_string());
 +        let celestial_quality = CelestialQuality::from_name(&quality_name).unwrap_or_else(|| {
 +            report_error!(
-+                "Invalid WARP_CELESTIAL_QUALITY={quality_name:?}; expected low, balanced, or high"
++                "Invalid WARP_CELESTIAL_QUALITY={quality_name:?}; expected auto, low, balanced, or high"
 +            );
-+            CelestialQuality::Balanced
++            CelestialQuality::Auto
 +        });
 +        let demo_value = match std::env::var("WARP_CELESTIAL_DEMO") {
 +            Ok(value) => Some(value),
@@ -390,7 +390,7 @@ index f10adef61..66a210c4a 100644
                  .expect("device should always vend a command queue"),
 +            start_time: now,
 +            celestial: CelestialState::new(now),
-+            celestial_trace_steps: celestial_quality.trace_steps(),
++            celestial_quality,
 +            celestial_demo_fill,
          }
      }
@@ -598,7 +598,7 @@ index f10adef61..66a210c4a 100644
 +            drawable_size.into(),
 +            fill,
 +            time,
-+            self.celestial_trace_steps,
++            self.celestial_quality.trace_steps(fill),
          );
 -        per_rect_uniforms.push(shader::PerRectUniforms::new(
 -            bounds.origin().into(),
@@ -1153,7 +1153,7 @@ new file mode 100644
 index 000000000..44acc1d1c
 --- /dev/null
 +++ b/crates/warpui/src/platform/mac/rendering/metal/renderer/celestial.rs
-@@ -0,0 +1,107 @@
+@@ -0,0 +1,112 @@
 +use std::time::Duration;
 +
 +use instant::Instant;
@@ -1167,6 +1167,7 @@ index 000000000..44acc1d1c
 +
 +#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 +pub(super) enum CelestialQuality {
++    Auto,
 +    Low,
 +    Balanced,
 +    High,
@@ -1175,6 +1176,7 @@ index 000000000..44acc1d1c
 +impl CelestialQuality {
 +    pub(super) fn from_name(name: &str) -> Option<Self> {
 +        match name {
++            "auto" => Some(Self::Auto),
 +            "low" => Some(Self::Low),
 +            "balanced" => Some(Self::Balanced),
 +            "high" => Some(Self::High),
@@ -1182,8 +1184,11 @@ index 000000000..44acc1d1c
 +        }
 +    }
 +
-+    pub(super) fn trace_steps(self) -> u32 {
++    pub(super) fn trace_steps(self, fill: f32) -> u32 {
 +        match self {
++            Self::Auto if fill < 0.35 => 24,
++            Self::Auto if fill < 0.75 => 36,
++            Self::Auto => 48,
 +            Self::Low => 24,
 +            Self::Balanced => 36,
 +            Self::High => 48,
@@ -1266,7 +1271,7 @@ new file mode 100644
 index 000000000..057d5dd3a
 --- /dev/null
 +++ b/crates/warpui/src/platform/mac/rendering/metal/renderer/celestial_tests.rs
-@@ -0,0 +1,97 @@
+@@ -0,0 +1,108 @@
 +use instant::Instant;
 +use pathfinder_color::ColorU;
 +use pathfinder_geometry::rect::RectF;
@@ -1341,20 +1346,31 @@ index 000000000..057d5dd3a
 +#[test]
 +fn quality_names_map_to_bounded_trace_steps() {
 +    assert_eq!(
-+        CelestialQuality::from_name("low").unwrap().trace_steps(),
++        CelestialQuality::from_name("low").unwrap().trace_steps(1.0),
 +        24
 +    );
 +    assert_eq!(
 +        CelestialQuality::from_name("balanced")
 +            .unwrap()
-+            .trace_steps(),
++            .trace_steps(0.0),
 +        36
 +    );
 +    assert_eq!(
-+        CelestialQuality::from_name("high").unwrap().trace_steps(),
++        CelestialQuality::from_name("high").unwrap().trace_steps(0.0),
 +        48
 +    );
 +    assert_eq!(CelestialQuality::from_name("turbo"), None);
++}
++
++#[test]
++fn automatic_quality_tracks_context_fill_at_deterministic_boundaries() {
++    let quality = CelestialQuality::from_name("auto").unwrap();
++    assert_eq!(quality.trace_steps(0.0), 24);
++    assert_eq!(quality.trace_steps(0.349), 24);
++    assert_eq!(quality.trace_steps(0.35), 36);
++    assert_eq!(quality.trace_steps(0.749), 36);
++    assert_eq!(quality.trace_steps(0.75), 48);
++    assert_eq!(quality.trace_steps(1.0), 48);
 +}
 +
 +#[test]
