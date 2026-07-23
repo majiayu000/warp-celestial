@@ -23,6 +23,8 @@ All notable changes to Warp Celestial are documented here. Versions follow
   hole without increasing the configured geodesic step limits.
 - Added an automatic quality mode that selects 24/36/48 geodesic steps from the
   current context fill while preserving fixed low/balanced/high overrides.
+- Bypassed the offscreen texture and celestial composite pass while the effect
+  is fully inactive, preserving Warp's direct single-pass rendering path.
 - Added localized magnetic prominence arches to the sun and reduced procedural
   ember counts to 12/20/28 for low/balanced/high quality.
 - Expanded demo launching to select the effect, quality and fixed context fill,

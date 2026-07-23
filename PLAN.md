@@ -9,7 +9,8 @@ renderer patch and the standalone Rust project.
 
 Warp Celestial is a source patch against one tested public Warp commit. It:
 
-1. renders the normal terminal scene into a reusable offscreen texture;
+1. renders inactive scenes directly and active scenes into a reusable offscreen
+   texture;
 2. publishes the focused pane's signed Claude context value in its Scene;
 3. runs a black-hole or sun fragment shader in a second Metal pass;
 4. redraws continuously only while an effect is active;

@@ -429,19 +429,26 @@ index f10adef61..66a210c4a 100644
      fn render(
          &mut self,
          scene: &Scene,
-@@ -293,551 +282,125 @@ impl Renderer {
+@@ -293,551 +282,164 @@ impl Renderer {
              .glyph_cache
              .update_config(&scene.rendering_config().glyphs);
  
 -        let render_pass = RenderPass::new(&self.command_queue, ctx.drawable);
 -
 -        Frame::new(scene, &render_pass.encoder, &mut self.resources, ctx).draw();
-+        let drawable_size = ctx.drawable_size;
-+        self.ensure_offscreen_texture(ctx.device, drawable_size);
 +        let fill = self
 +            .celestial_demo_fill
 +            .unwrap_or_else(|| self.celestial.update(scene, Instant::now()));
++        let postprocess_active = self.celestial.needs_postprocess(self.celestial_demo_fill);
++        let drawable_size = ctx.drawable_size;
++        if postprocess_active {
++            self.ensure_offscreen_texture(ctx.device, drawable_size);
++        } else {
++            self.resources.offscreen_texture = None;
++            self.resources.offscreen_texture_size = Vector2F::zero();
++        }
 +        let time = self.start_time.elapsed().as_secs_f32();
++        let drawable_texture = ctx.drawable.texture();
  
 -        render_pass.finish_with_capture(
 -            ctx.drawable_size,
@@ -469,7 +476,11 @@ index f10adef61..66a210c4a 100644
 +        let scene_color_attachment =
 +            // SAFETY: index 0 is always a valid color attachment slot.
 +            unsafe { scene_pass_descriptor.colorAttachments().objectAtIndexedSubscript(0) };
-+        scene_color_attachment.setTexture(self.resources.offscreen_texture.as_deref());
++        if postprocess_active {
++            scene_color_attachment.setTexture(self.resources.offscreen_texture.as_deref());
++        } else {
++            scene_color_attachment.setTexture(Some(&drawable_texture));
++        }
 +        scene_color_attachment.setLoadAction(MTLLoadAction::Clear);
 +        scene_color_attachment.setStoreAction(MTLStoreAction::Store);
 +        scene_color_attachment.setClearColor(MTLClearColor {
@@ -499,8 +510,18 @@ index f10adef61..66a210c4a 100644
 +        frame::Frame::new(scene, &scene_encoder, &mut self.resources, ctx).draw();
 +        scene_encoder.endEncoding();
 +
++        if !postprocess_active {
++            return Self::finish_frame(
++                &command_buffer,
++                ctx.drawable,
++                &drawable_texture,
++                drawable_size,
++                should_capture,
++                presents_with_transaction,
++            );
++        }
++
 +        // Composite pass: run the blackhole post-process shader and output to the drawable.
-+        let drawable_texture = ctx.drawable.texture();
 +        let composite_pass_descriptor = MTLRenderPassDescriptor::new();
 +        let composite_color_attachment =
 +            // SAFETY: index 0 is always a valid color attachment slot.
@@ -864,8 +885,26 @@ index f10adef61..66a210c4a 100644
 -                dash_length,
 -                gap_lengths.into(),
 -            ));
++        Self::finish_frame(
++            &command_buffer,
++            ctx.drawable,
++            &drawable_texture,
++            drawable_size,
++            should_capture,
++            presents_with_transaction,
++        )
++    }
++
++    fn finish_frame(
++        command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
++        drawable: &ProtocolObject<dyn CAMetalDrawable>,
++        drawable_texture: &ProtocolObject<dyn MTLTexture>,
++        drawable_size: Vector2F,
++        should_capture: bool,
++        presents_with_transaction: bool,
++    ) -> Option<CapturedFrame> {
 +        if !should_capture && !presents_with_transaction {
-+            command_buffer.presentDrawable(ProtocolObject::from_ref(ctx.drawable));
++            command_buffer.presentDrawable(ProtocolObject::from_ref(drawable));
 +            command_buffer.commit();
 +            return None;
          }
@@ -894,7 +933,7 @@ index f10adef61..66a210c4a 100644
 -            self.command_encoder
 -                .setFragmentBytes_length_atIndex(uniforms_ptr, uniforms_len, 0);
 +        let capture = if should_capture {
-+            capture_frame(&drawable_texture, drawable_size)
++            capture_frame(drawable_texture, drawable_size)
 +        } else {
 +            None
 +        };
@@ -909,7 +948,7 @@ index f10adef61..66a210c4a 100644
 -                    per_rect_uniforms.len(),
 -                );
 -        }
-+        ctx.drawable.present();
++        drawable.present();
 +        capture
      }
  
@@ -1148,7 +1187,7 @@ index f10adef61..66a210c4a 100644
 -        texture_descriptor.setWidth(atlas_size);
 -        texture_descriptor.setHeight(atlas_size);
 +    fn blackhole_active(&self) -> bool {
-+        self.celestial_demo_fill.is_some() || self.celestial.is_active()
++        self.celestial.needs_postprocess(self.celestial_demo_fill)
      }
 -    device
 -        .newTextureWithDescriptor(&texture_descriptor)
@@ -1159,7 +1198,7 @@ new file mode 100644
 index 000000000..44acc1d1c
 --- /dev/null
 +++ b/crates/warpui/src/platform/mac/rendering/metal/renderer/celestial.rs
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,116 @@
 +use std::time::Duration;
 +
 +use instant::Instant;
@@ -1267,6 +1306,10 @@ index 000000000..44acc1d1c
 +    pub(super) fn is_active(&self) -> bool {
 +        self.current_fill > SETTLED_EPSILON || self.target_fill > SETTLED_EPSILON
 +    }
++
++    pub(super) fn needs_postprocess(&self, demo_fill: Option<f32>) -> bool {
++        demo_fill.is_some() || self.is_active()
++    }
 +}
 +
 +#[cfg(test)]
@@ -1277,7 +1320,7 @@ new file mode 100644
 index 000000000..057d5dd3a
 --- /dev/null
 +++ b/crates/warpui/src/platform/mac/rendering/metal/renderer/celestial_tests.rs
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,122 @@
 +use instant::Instant;
 +use pathfinder_color::ColorU;
 +use pathfinder_geometry::rect::RectF;
@@ -1385,6 +1428,20 @@ index 000000000..057d5dd3a
 +    assert_eq!(parse_demo_fill(Some("0.65")).unwrap(), Some(0.65));
 +    assert!(parse_demo_fill(Some("1.1")).is_err());
 +    assert!(parse_demo_fill(Some("not-a-number")).is_err());
++}
++
++#[test]
++fn postprocess_runs_only_for_an_active_effect_or_demo() {
++    let start = Instant::now();
++    let mut state = CelestialState::new(start);
++    assert!(!state.needs_postprocess(None));
++    assert!(state.needs_postprocess(Some(0.0)));
++
++    state.update(
++        &scene_with_fill(0.5),
++        start + std::time::Duration::from_millis(100),
++    );
++    assert!(state.needs_postprocess(None));
 +}
 diff --git a/crates/warpui/src/platform/mac/rendering/metal/renderer/frame.rs b/crates/warpui/src/platform/mac/rendering/metal/renderer/frame.rs
 new file mode 100644
