@@ -7,7 +7,12 @@ Metal renderer in [Warp](https://github.com/warpdotdev/warp). The black hole
 physically lenses terminal content through a Schwarzschild ray integrator, and
 its size follows the focused Claude Code pane's context-window usage.
 
-![Warp Celestial black hole](blackhole.png)
+| Black hole — 85% context | Sun — 75% context |
+| --- | --- |
+| ![Warp Celestial black hole distorting real terminal content](docs/media/blackhole-demo.jpeg) | ![Warp Celestial sun with prominences over real terminal content](docs/media/sun-demo.jpeg) |
+
+Both images are captures from the locally built patched app, not generated
+mockups.
 
 ## Requirements
 
@@ -42,11 +47,19 @@ To check the machine without installing anything:
 ./install.sh --check
 ```
 
+To diagnose both prerequisites and an existing installation:
+
+```bash
+./install.sh --doctor
+```
+
 Useful options:
 
 ```text
 --skip-claude-config    Build the app without editing Claude Code settings
 --no-launch             Do not open the app after installation
+--clean-build-cache     Reclaim compiled build space without uninstalling the app
+--uninstall             Safely remove the app and its managed Claude integration
 --yes                   Accept prompts; required for non-interactive installation
 ```
 
@@ -54,7 +67,7 @@ Useful options:
 
 1. Verifies macOS, full Xcode, Metal tools, Rust, Python, Git and disk space.
 2. Installs `jq` through Homebrew when needed and installs Warp's pinned
-   `cargo-bundle` version through Cargo.
+   `cargo-bundle` into the project support directory through Cargo.
 3. Clones Warp at the tested commit `69ce3728` into
    `~/.local/share/warp-celestial/warp`.
 4. Applies `patches/celestial-effect.patch` and builds the public OSS app. No
@@ -66,10 +79,29 @@ Useful options:
 7. With confirmation, backs up `~/.claude/settings.json`, adds the top-level
    `statusLine` command, and merges `SessionStart`/`SessionEnd` lifecycle hooks
    without changing unrelated settings or hooks.
+8. Records which Claude settings it owns, allowing uninstall to restore a
+   previous status line without overwriting changes made after installation.
 
 The installer is repeatable. Running it again reuses the pinned source checkout
 and Cargo build cache. If it cannot verify the pinned commit and patch state, it
 stops instead of resetting or deleting the checkout.
+
+## Releases and compatibility
+
+The current project version is `0.1.0`; no GitHub release has been published
+yet. `COMPATIBILITY.json` is the machine-checked source of truth for the project
+version, Warp commit, renderer patch digest, Rust toolchain and bundler
+revision. CI rejects drift between that manifest, `VERSION`, `install.sh` and
+the patch itself. A weekly non-mutating probe reports whether the same patch
+still applies to the latest public Warp `master`.
+
+After a controlled `v0.1.0` tag is created from `master`, the release workflow
+reruns the complete Python, Rust, Metal, Warp patch and clippy gates before
+publishing source plus a SHA-256 checksum. It does not publish a prebuilt app:
+local builds are ad-hoc signed, and publishing a trusted binary requires an
+Apple Developer signing identity, notarization and the corresponding AGPL
+source distribution. The repository is licensed under AGPL-3.0; adapted MIT
+work remains identified in `THIRD_PARTY_NOTICES.md`.
 
 ## Running it
 
@@ -97,7 +129,16 @@ reports no active context usage. To preview it without waiting for a session:
 
 `--demo` launches a separate app process with a fixed 65% context level. It
 does not modify context records and remains active until that app process exits.
-You can combine it with a quality level, for example `--demo low`.
+It accepts an effect, quality and optional fill value:
+
+```bash
+warp-celestial --demo blackhole high 0.85
+warp-celestial --demo sun high 0.75
+warp-celestial --demo low
+```
+
+See [the demo capture guide](docs/DEMO.md) for reproducible screenshot and video
+shots. Published media should come from the real patched app.
 
 If `~/.local/bin` is on your `PATH`, the shorter commands work too:
 
@@ -157,9 +198,10 @@ that texture and runs one of two fragment shaders:
 
 - `blackhole_fragment`: numerically integrated Schwarzschild geodesics,
   physically captured rays, multi-image accretion disk, blackbody temperature,
-  Doppler shift/beaming, time dilation and weak-field lensing
-- `sun_fragment`: limb-darkened photosphere, granulation, sunspots, corona and
-  procedural embers
+  Doppler shift/beaming, time dilation, traced photon-sphere caustics, turbulent
+  bright knots and weak-field lensing
+- `sun_fragment`: limb-darkened photosphere, granulation, sunspots, corona,
+  magnetic prominence arches and quality-scaled procedural embers
 
 Set `WARP_CELESTIAL=sun` before launch to select the sun. Any other value selects
 the black hole. The focused pane publishes a zero-sized transparent marker into
@@ -179,8 +221,10 @@ This costs more GPU time and memory bandwidth than stock Warp because an active
 effect adds a full-screen pass, and pixels near the hole integrate 24-48 ray
 steps. Pixels in the protected bottom work area exit early; distant pixels use
 a cheaper analytic approximation. Larger Retina windows and high-refresh-rate
-displays cost more. Use `low` on a laptop or `high` for recordings; close the
-custom app or end the focused Claude session to stop continuous rendering.
+displays cost more. Sun particles are capped at 12, 20 or 28 for low, balanced
+or high quality and are evaluated only close to the star. Use `low` on a laptop
+or `high` for recordings; close the custom app or end the focused Claude
+session to stop continuous rendering.
 
 ### Tabs, panes and concurrent sessions
 
@@ -205,7 +249,7 @@ git apply /path/to/warp-celestial/patches/celestial-effect.patch
 
 cargo install cargo-bundle \
   --git https://github.com/burtonageo/cargo-bundle \
-  --rev ae4c76e92c08774bf54ff077b1c52e3d1cd6c16d
+  --rev 739f92c37c789b5511a448a389cbc76fcebd99df
 
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 export WARP_BIN_NAME=warp-oss
@@ -281,31 +325,49 @@ work you need, then run the installer again.
 
 ## Removing the local installation
 
-After saving anything you need, remove these project-owned paths:
+Run:
 
-```text
-~/Applications/Warp Celestial.app
-~/.local/bin/warp-celestial
-~/.local/share/warp-celestial
-~/.cache/warp/blackhole_contexts
+```bash
+./install.sh --uninstall
 ```
 
-Restore the timestamped `~/.claude/settings.json.backup.*` file, or remove the
-`statusLine` entry and the two lifecycle hook commands added by this project.
+The uninstaller removes the app, launcher, managed source/build directory and
+context cache. It removes only the exact Claude hooks installed by this project.
+If the installer replaced an earlier status line, it restores that value only
+when the current value is still managed by Warp Celestial; later user edits are
+left untouched. Timestamped Claude settings backups are preserved.
+
+Recursive removal requires a private ownership marker bound to the canonical
+directory. Custom support/cache roots must stay below `HOME` and end in
+`warp-celestial`/`blackhole_contexts`; broad or unowned paths are rejected. If a
+pre-existing Claude configuration still references the bridge but was never
+claimed by Warp Celestial, uninstall stops and preserves the bridge instead of
+leaving a broken command.
+
+To keep the installed app but reclaim the large Cargo build directory:
+
+```bash
+./install.sh --clean-build-cache
+```
 
 ## Repository contents
 
 | Path | Purpose |
 | --- | --- |
 | `install.sh` | Preflight, build, app installation and safe Claude configuration |
+| `COMPATIBILITY.json` | Machine-checked Warp, patch and toolchain compatibility |
+| `CHANGELOG.md` | Release history |
 | `scripts/configure_claude.py` | Atomic, preserving update of Claude Code settings |
+| `scripts/check_compatibility.py` | Release and installer pin consistency checks |
+| `scripts/install_safety.sh` | Managed-directory ownership and removal guards |
+| `scripts/warp_celestial_launcher.py` | Validated effect, quality and demo launcher |
 | `patches/celestial-effect.patch` | Complete Warp source patch |
 | `claude-token.py` | Claude Code context-to-renderer bridge |
 | `THIRD_PARTY_NOTICES.md` | Attribution and MIT notice for adapted work |
 | `blackhole.png` | README preview captured from the real patched app |
 | `warp-channel-config.example` | Optional local-development stub; not used by the installer |
 | `src/main.rs` | Historical standalone Metal proof of concept |
-| `PLAN.md` | Original integration plan |
+| `PLAN.md` | Current capabilities, next work and release gates |
 
 ## Limitations and license
 
@@ -313,7 +375,7 @@ Restore the timestamped `~/.claude/settings.json.backup.*` file, or remove the
 - The patch is pinned to Warp commit `69ce3728`; newer Warp revisions may need a
   rebase.
 - The locally built OSS app is ad-hoc signed, not Apple-notarized.
-- Warp is AGPL-3.0. The patch is intended to be applied to and distributed with
-  Warp under the same license obligations.
+- Warp Celestial and the patched Warp derivative are distributed under
+  AGPL-3.0; see `LICENSE`.
 - The geodesic renderer and cursor-channel protocol retain the upstream MIT
   attribution documented in `THIRD_PARTY_NOTICES.md`.

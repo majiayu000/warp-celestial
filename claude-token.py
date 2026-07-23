@@ -39,10 +39,37 @@ import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Optional
 
 # Cache directory. Override it when testing or when Warp uses a nonstandard home.
 DEFAULT_CONTEXT_DIR = Path.home() / ".cache" / "warp" / "blackhole_contexts"
-CONTEXT_DIR = Path(os.environ.get("BLACKHOLE_CONTEXT_DIR", DEFAULT_CONTEXT_DIR))
+CONTEXT_CONFIG_PATH = Path(__file__).resolve().with_name("context-cache-dir")
+
+
+def configured_context_dir() -> Path:
+    """Resolve the explicit, installed, or default context cache directory."""
+    explicit = os.environ.get("BLACKHOLE_CONTEXT_DIR") or os.environ.get(
+        "WARP_CELESTIAL_CACHE_DIR"
+    )
+    if explicit:
+        return Path(explicit).expanduser()
+    try:
+        configured = CONTEXT_CONFIG_PATH.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return DEFAULT_CONTEXT_DIR
+    except OSError as error:
+        raise RuntimeError(
+            f"unable to read context cache configuration: {error}"
+        ) from error
+    configured_path = Path(configured).expanduser()
+    if not configured or not configured_path.is_absolute():
+        raise RuntimeError(
+            f"invalid context cache configuration in {CONTEXT_CONFIG_PATH}"
+        )
+    return configured_path
+
+
+CONTEXT_DIR = configured_context_dir()
 
 # Cursor-channel encoding adapted from s0xDk/ghostty-blackhole (MIT).
 # The high nibbles are a signature; the low nibbles hold a quantized fill and
@@ -70,7 +97,7 @@ def context_fill(data: dict) -> float:
     return 0.0
 
 
-def context_record(data: dict) -> Path | None:
+def context_record(data: dict) -> Optional[Path]:
     """Return the safe cache record for this Warp pane and Claude session."""
     pane_id = os.environ.get("WARP_TERMINAL_SESSION_UUID", "").lower()
     session_id = data.get("session_id")
@@ -127,7 +154,7 @@ def remove_fill(record: Path) -> None:
                 raise
 
 
-def _pane_fill_unlocked(record: Path) -> float | None:
+def _pane_fill_unlocked(record: Path) -> Optional[float]:
     maximum = None
     try:
         records = record.parent.glob("*.context")
@@ -140,13 +167,13 @@ def _pane_fill_unlocked(record: Path) -> float | None:
     return maximum
 
 
-def pane_fill(record: Path) -> float | None:
+def pane_fill(record: Path) -> Optional[float]:
     """Return the highest live Claude fill in this Warp pane."""
     with cache_lock(record):
         return _pane_fill_unlocked(record)
 
 
-def cursor_sequence(level: float | None) -> bytes:
+def cursor_sequence(level: Optional[float]) -> bytes:
     """Encode a fill as OSC 12, or reset the cursor with OSC 112."""
     if level is None:
         return b"\033]112\007"
@@ -161,7 +188,7 @@ def cursor_sequence(level: float | None) -> bytes:
     return b"\033]12;#%02x%02x%02x\007" % rgb
 
 
-def session_tty() -> Path | None:
+def session_tty() -> Optional[Path]:
     """Find the terminal inherited by Claude when hooks have no controlling tty."""
     process_id = os.getppid()
     for _ in range(10):
@@ -187,7 +214,7 @@ def session_tty() -> Path | None:
     return None
 
 
-def emit_cursor(level: float | None) -> bool:
+def emit_cursor(level: Optional[float]) -> bool:
     """Write the pane-local fill directly to its terminal cursor state."""
     sequence = cursor_sequence(level)
     errors = []

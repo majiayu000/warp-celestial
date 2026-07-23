@@ -14,6 +14,43 @@ claude_token = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(claude_token)
 
 
+class ContextDirectoryTests(unittest.TestCase):
+    def test_explicit_cache_directory_takes_precedence(self):
+        with mock.patch.dict(
+            os.environ,
+            {"BLACKHOLE_CONTEXT_DIR": "/tmp/explicit-blackhole-contexts"},
+            clear=True,
+        ):
+            self.assertEqual(
+                claude_token.configured_context_dir(),
+                Path("/tmp/explicit-blackhole-contexts"),
+            )
+
+    def test_installed_cache_directory_is_loaded_from_managed_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "context-cache-dir"
+            configured_path = Path(directory) / "blackhole_contexts"
+            config_path.write_text(f"{configured_path}\n", encoding="utf-8")
+            with mock.patch.object(
+                claude_token, "CONTEXT_CONFIG_PATH", config_path
+            ), mock.patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(
+                    claude_token.configured_context_dir(), configured_path
+                )
+
+    def test_relative_installed_cache_directory_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "context-cache-dir"
+            config_path.write_text("relative/cache\n", encoding="utf-8")
+            with mock.patch.object(
+                claude_token, "CONTEXT_CONFIG_PATH", config_path
+            ), mock.patch.dict(os.environ, {}, clear=True):
+                with self.assertRaisesRegex(
+                    RuntimeError, "invalid context cache configuration"
+                ):
+                    claude_token.configured_context_dir()
+
+
 class ContextFillTests(unittest.TestCase):
     def test_prefers_used_percentage_and_clamps_it(self):
         self.assertEqual(
@@ -148,15 +185,13 @@ class ContextFileTests(unittest.TestCase):
             record = Path(directory) / "pane" / "session.context"
             record.parent.mkdir()
             record.write_text("0.75\n", encoding="utf-8")
-            with (
-                mock.patch.object(claude_token, "cache_lock", observed_lock),
-                mock.patch.object(
+            with mock.patch.object(claude_token, "cache_lock", observed_lock):
+                with mock.patch.object(
                     claude_token,
                     "emit_cursor",
                     side_effect=lambda fill: events.append(("emit", fill)) or True,
-                ),
-            ):
-                self.assertTrue(claude_token.sync_cursor(record))
+                ):
+                    self.assertTrue(claude_token.sync_cursor(record))
 
         self.assertEqual(events, ["locked", ("emit", 0.75), "unlocked"])
 
@@ -181,7 +216,10 @@ class ContextFileTests(unittest.TestCase):
 class CursorChannelTests(unittest.TestCase):
     def test_cursor_sequence_round_trips_fill_and_checksum(self):
         sequence = claude_token.cursor_sequence(0.8)
-        encoded = sequence.removeprefix(b"\033]12;#").removesuffix(b"\007")
+        prefix = b"\033]12;#"
+        self.assertTrue(sequence.startswith(prefix))
+        self.assertTrue(sequence.endswith(b"\007"))
+        encoded = sequence[len(prefix) : -1]
         red, green, blue = bytes.fromhex(encoded.decode("ascii"))
         high = green & 0xF
         low = blue & 0xF
@@ -197,11 +235,9 @@ class CursorChannelTests(unittest.TestCase):
 
     def test_emit_cursor_uses_controlling_tty_without_process_scan(self):
         terminal = mock.mock_open()
-        with (
-            mock.patch.object(Path, "open", terminal),
-            mock.patch.object(claude_token, "session_tty") as session_tty,
-        ):
-            self.assertTrue(claude_token.emit_cursor(0.5))
+        with mock.patch.object(Path, "open", terminal):
+            with mock.patch.object(claude_token, "session_tty") as session_tty:
+                self.assertTrue(claude_token.emit_cursor(0.5))
 
         session_tty.assert_not_called()
         terminal().write.assert_called_once_with(claude_token.cursor_sequence(0.5))

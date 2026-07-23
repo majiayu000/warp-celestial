@@ -1,0 +1,51 @@
+name: Bug report
+description: Report an installation, context, rendering, or performance problem
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the observed and expected behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Doctor output
+      description: Paste the complete output of ./install.sh --doctor.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware and display
+      placeholder: Mac model, logical window size, refresh rate
+    validations:
+      required: true
+  - type: input
+    id: mode
+    attributes:
+      label: Effect and quality
+      placeholder: blackhole balanced
+    validations:
+      required: true
+  - type: dropdown
+    id: demo
+    attributes:
+      label: Does demo mode reproduce it?
+      options:
+        - "Yes"
+        - "No"
+        - "Not tested"
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Reproduction and evidence
+      description: Add exact steps and sanitized screenshots or video.
+    validations:
+      required: true

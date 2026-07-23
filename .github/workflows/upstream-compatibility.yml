@@ -1,0 +1,44 @@
+name: Upstream compatibility
+
+on:
+  schedule:
+    - cron: "17 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe_latest_warp:
+    name: Probe latest Warp master
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Warp Celestial
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: warp-celestial
+      - name: Check out latest public Warp
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: warpdotdev/warp
+          ref: master
+          path: warp-latest
+      - name: Report whether the current patch applies
+        run: |
+          latest_commit="$(git -C warp-latest rev-parse HEAD)"
+          {
+            echo "## Warp upstream compatibility"
+            echo
+            echo "- Latest checked commit: \`$latest_commit\`"
+            echo "- Tested/pinned commit: \`69ce3728acae0b01c2f457b65a90c144664686aa\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if git -C warp-latest apply --check \
+            ../warp-celestial/patches/celestial-effect.patch
+          then
+            echo "- Result: current patch applies cleanly." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- Result: rebase required before updating the supported commit." \
+              >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::Warp master requires a renderer patch rebase ($latest_commit)"
+          fi

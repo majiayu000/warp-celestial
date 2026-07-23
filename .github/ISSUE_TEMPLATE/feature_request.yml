@@ -1,0 +1,26 @@
+name: Feature request
+description: Propose one focused product or renderer improvement
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest observable change.
+    validations:
+      required: true
+  - type: textarea
+    id: performance
+    attributes:
+      label: GPU and compatibility impact
+      description: Explain expected rendering cost and Warp patch impact.
+    validations:
+      required: true
