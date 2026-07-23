@@ -346,12 +346,18 @@ index f10adef61..66a210c4a 100644
          let quad_vertices = new_metal_buffer(
              device,
              &[
-@@ -241,19 +180,48 @@ impl Renderer {
+@@ -241,19 +180,54 @@ impl Renderer {
  
          let glyph_cache = GlyphCache::new(glyph_config);
  
-+        let quality_name =
-+            std::env::var("WARP_CELESTIAL_QUALITY").unwrap_or_else(|_| "auto".to_string());
++        let quality_name = match std::env::var("WARP_CELESTIAL_QUALITY") {
++            Ok(value) => value,
++            Err(std::env::VarError::NotPresent) => "auto".to_string(),
++            Err(std::env::VarError::NotUnicode(_)) => {
++                report_error!("WARP_CELESTIAL_QUALITY must be valid UTF-8");
++                "auto".to_string()
++            }
++        };
 +        let celestial_quality = CelestialQuality::from_name(&quality_name).unwrap_or_else(|| {
 +            report_error!(
 +                "Invalid WARP_CELESTIAL_QUALITY={quality_name:?}; expected auto, low, balanced, or high"

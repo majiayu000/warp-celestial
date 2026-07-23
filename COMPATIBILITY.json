@@ -11,7 +11,7 @@
     "repository": "https://github.com/warpdotdev/warp.git",
     "commit": "69ce3728acae0b01c2f457b65a90c144664686aa",
     "patch": "patches/celestial-effect.patch",
-    "patch_sha256": "a9ed86da07a35e98cc14c281a6ef21f8982ed22378e83ed3130bc2b1859ebaae"
+    "patch_sha256": "30549116724c363932e44e01cc50ab7692f9c2eb7c06cd0703b9eb93557f1595"
   },
   "cargo_bundle": {
     "repository": "https://github.com/burtonageo/cargo-bundle",
