@@ -7,7 +7,12 @@ Metal renderer in [Warp](https://github.com/warpdotdev/warp). The black hole
 physically lenses terminal content through a Schwarzschild ray integrator, and
 its size follows the focused Claude Code pane's context-window usage.
 
-![Warp Celestial black hole](blackhole.png)
+| Black hole — 85% context | Sun — 75% context |
+| --- | --- |
+| ![Warp Celestial black hole distorting real terminal content](docs/media/blackhole-demo.jpeg) | ![Warp Celestial sun with prominences over real terminal content](docs/media/sun-demo.jpeg) |
+
+Both images are captures from the locally built patched app, not generated
+mockups.
 
 ## Requirements
 
@@ -122,7 +127,16 @@ reports no active context usage. To preview it without waiting for a session:
 
 `--demo` launches a separate app process with a fixed 65% context level. It
 does not modify context records and remains active until that app process exits.
-You can combine it with a quality level, for example `--demo low`.
+It accepts an effect, quality and optional fill value:
+
+```bash
+warp-celestial --demo blackhole high 0.85
+warp-celestial --demo sun high 0.75
+warp-celestial --demo low
+```
+
+See [the demo capture guide](docs/DEMO.md) for reproducible screenshot and video
+shots. Published media should come from the real patched app.
 
 If `~/.local/bin` is on your `PATH`, the shorter commands work too:
 
@@ -336,13 +350,14 @@ To keep the installed app but reclaim the large Cargo build directory:
 | `CHANGELOG.md` | Release history |
 | `scripts/configure_claude.py` | Atomic, preserving update of Claude Code settings |
 | `scripts/check_compatibility.py` | Release and installer pin consistency checks |
+| `scripts/warp_celestial_launcher.py` | Validated effect, quality and demo launcher |
 | `patches/celestial-effect.patch` | Complete Warp source patch |
 | `claude-token.py` | Claude Code context-to-renderer bridge |
 | `THIRD_PARTY_NOTICES.md` | Attribution and MIT notice for adapted work |
 | `blackhole.png` | README preview captured from the real patched app |
 | `warp-channel-config.example` | Optional local-development stub; not used by the installer |
 | `src/main.rs` | Historical standalone Metal proof of concept |
-| `PLAN.md` | Original integration plan |
+| `PLAN.md` | Current capabilities, next work and release gates |
 
 ## Limitations and license
 

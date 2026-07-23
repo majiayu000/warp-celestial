@@ -6,7 +6,11 @@ Warp Celestial 为 macOS 版 Warp 的 Metal 渲染器加入基于测地线追踪
 动态太阳效果。黑洞通过 Schwarzschild 光线积分真实扭曲终端内容，大小由当前
 焦点 Claude Code Pane 的上下文窗口使用比例驱动。
 
-![Warp Celestial 黑洞](blackhole.png)
+| 黑洞 — 85% 上下文 | 太阳 — 75% 上下文 |
+| --- | --- |
+| ![Warp Celestial 黑洞真实扭曲终端内容](docs/media/blackhole-demo.jpeg) | ![Warp Celestial 太阳和日珥覆盖真实终端内容](docs/media/sun-demo.jpeg) |
+
+两张图片都截取自本地真实构建的补丁版应用，不是生成的效果图。
 
 ## 环境要求
 
@@ -113,7 +117,16 @@ AGPL 源码分发。仓库采用 AGPL-3.0，适配自 MIT 项目的部分继续�
 ```
 
 `--demo` 会启动一个固定为 65% 上下文占用的独立应用进程，不会修改上下文缓存；
-效果持续到该进程退出。也可以使用 `--demo low` 指定性能档位。
+效果持续到该进程退出。它支持指定效果、画质和可选占用比例：
+
+```bash
+warp-celestial --demo blackhole high 0.85
+warp-celestial --demo sun high 0.75
+warp-celestial --demo low
+```
+
+可按照[中文演示录制指南](docs/DEMO.zh-CN.md)拍摄可复现的截图和视频。正式发布的
+素材应来自真实补丁版应用。
 
 如果 `~/.local/bin` 已加入 `PATH`，可以使用短命令：
 
@@ -308,13 +321,14 @@ Celestial 管理时才会恢复旧值；安装后用户自行修改的值会保�
 | `CHANGELOG.md` | 版本变更记录 |
 | `scripts/configure_claude.py` | 原子且保留既有内容地更新 Claude Code 配置 |
 | `scripts/check_compatibility.py` | Release 与安装器固定版本一致性检查 |
+| `scripts/warp_celestial_launcher.py` | 校验效果、画质和演示参数的启动器 |
 | `patches/celestial-effect.patch` | 完整 Warp 源码补丁 |
 | `claude-token.py` | Claude Code 上下文到渲染器的桥接脚本 |
 | `THIRD_PARTY_NOTICES.md` | 所适配上游工作的归属与 MIT 声明 |
 | `blackhole.png` | 从真实补丁版应用截取的 README 预览图 |
 | `warp-channel-config.example` | 可选开发配置，安装器不会使用 |
 | `src/main.rs` | 历史独立 Metal PoC |
-| `PLAN.md` | 最初的集成计划 |
+| `PLAN.md` | 当前能力、后续工作与 Release 门禁 |
 
 ## 限制与许可证
 

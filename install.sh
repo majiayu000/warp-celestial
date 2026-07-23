@@ -15,6 +15,7 @@ TARGET_DIR="${INSTALL_ROOT}/target"
 BIN_DIR="${HOME}/.local/bin"
 APP_PATH="${APP_DIR}/Warp Celestial.app"
 HOOK_PATH="${INSTALL_ROOT}/claude-token.py"
+LAUNCHER_IMPL_PATH="${INSTALL_ROOT}/warp_celestial_launcher.py"
 CLAUDE_STATE="${INSTALL_ROOT}/claude-settings-state.json"
 CONTEXT_DIR="${WARP_CELESTIAL_CACHE_DIR:-${HOME}/.cache/warp/blackhole_contexts}"
 LAUNCHER_PATH="${BIN_DIR}/warp-celestial"
@@ -268,6 +269,9 @@ run_doctor() {
   [[ -x "$HOOK_PATH" ]] &&
     doctor_ok "Context bridge is executable at ${HOOK_PATH}." ||
     doctor_problem "Context bridge is missing or not executable at ${HOOK_PATH}."
+  [[ -x "$LAUNCHER_IMPL_PATH" ]] &&
+    doctor_ok "Launcher implementation is executable." ||
+    doctor_problem "Launcher implementation is missing or not executable."
 
   if [[ -e "${SOURCE_DIR}/.git" ]]; then
     commit="$(git -C "$SOURCE_DIR" rev-parse HEAD 2>/dev/null || true)"
@@ -374,9 +378,41 @@ prepare_warp_source() {
   mkdir -p "$INSTALL_ROOT"
 
   if [[ ! -e "$SOURCE_DIR" ]]; then
-    log "Cloning the pinned Warp source. This download can take several minutes."
-    git clone --filter=blob:none --no-checkout "$WARP_REPOSITORY" "$SOURCE_DIR"
-    git -C "$SOURCE_DIR" checkout --detach "$WARP_COMMIT"
+    local stage_root stage_source fetched
+    stage_root="$(mktemp -d "${INSTALL_ROOT}/.warp-download.XXXXXX")"
+    stage_source="${stage_root}/warp"
+    fetched=false
+    mkdir -p "$stage_source"
+
+    log "Downloading the pinned Warp source. This can take several minutes."
+    if ! git -C "$stage_source" init --quiet ||
+      ! git -C "$stage_source" remote add origin "$WARP_REPOSITORY" ||
+      ! git -C "$stage_source" config http.version HTTP/1.1; then
+      remove_managed_path "$stage_root"
+      fail "Could not initialize the temporary Warp checkout."
+    fi
+
+    for attempt in 1 2 3; do
+      if git -C "$stage_source" fetch --depth=1 origin "$WARP_COMMIT"; then
+        fetched=true
+        break
+      fi
+      log "Warp download attempt ${attempt} failed."
+    done
+
+    if [[ "$fetched" != true ]]; then
+      remove_managed_path "$stage_root"
+      fail "Could not download the tested Warp commit after 3 attempts."
+    fi
+    if ! git -C "$stage_source" checkout --detach FETCH_HEAD; then
+      remove_managed_path "$stage_root"
+      fail "Downloaded Warp but could not check out the tested commit."
+    fi
+    if ! mv "$stage_source" "$SOURCE_DIR"; then
+      remove_managed_path "$stage_root"
+      fail "Could not move the verified Warp checkout into ${SOURCE_DIR}."
+    fi
+    rmdir "$stage_root"
   elif [[ ! -e "${SOURCE_DIR}/.git" ]]; then
     fail "${SOURCE_DIR} exists but is not a managed Warp checkout. Move it away and rerun."
   fi
@@ -449,43 +485,19 @@ build_app() {
 install_support_files() {
   mkdir -p "$INSTALL_ROOT" "$BIN_DIR"
   install -m 0755 "${SCRIPT_DIR}/claude-token.py" "$HOOK_PATH"
+  install -m 0755 \
+    "${SCRIPT_DIR}/scripts/warp_celestial_launcher.py" \
+    "$LAUNCHER_IMPL_PATH"
 
-  local quoted_app
+  local quoted_app quoted_launcher_impl
   printf -v quoted_app '%q' "$APP_PATH"
+  printf -v quoted_launcher_impl '%q' "$LAUNCHER_IMPL_PATH"
   cat >"$LAUNCHER_PATH" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
 APP_PATH=${quoted_app}
-effect="\${1:-blackhole}"
-quality="\${2:-balanced}"
-demo_fill=""
-
-case "\$effect" in
-  blackhole | sun) ;;
-  --demo)
-    effect="blackhole"
-    demo_fill="0.65"
-    ;;
-  *)
-    printf 'Usage: warp-celestial [blackhole|sun|--demo] [low|balanced|high]\\n' >&2
-    exit 2
-    ;;
-esac
-
-case "\$quality" in
-  low | balanced | high) ;;
-  *)
-    printf 'Quality must be low, balanced, or high.\\n' >&2
-    exit 2
-    ;;
-esac
-
-open_args=(-na "\$APP_PATH" --env "WARP_CELESTIAL=\$effect" --env "WARP_CELESTIAL_QUALITY=\$quality")
-if [[ -n "\$demo_fill" ]]; then
-  open_args+=(--env "WARP_CELESTIAL_DEMO=\$demo_fill")
-fi
-/usr/bin/open "\${open_args[@]}"
+exec python3 ${quoted_launcher_impl} "\$APP_PATH" "\$@"
 EOF
   chmod 0755 "$LAUNCHER_PATH"
   log "Installed launcher ${LAUNCHER_PATH}."

@@ -11,6 +11,10 @@ All notable changes to Warp Celestial are documented here. Versions follow
   hole without increasing the configured geodesic step limits.
 - Added localized magnetic prominence arches to the sun and reduced procedural
   ember counts to 12/20/28 for low/balanced/high quality.
+- Expanded demo launching to select the effect, quality and fixed context fill,
+  with reproducible English and Chinese capture guides.
+- Made Warp downloads transactional and retry the pinned shallow fetch over
+  HTTP/1.1, preventing a failed network transfer from poisoning later installs.
 
 ## [0.1.0] - 2026-07-23
 

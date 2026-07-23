@@ -32,10 +32,12 @@ jobs:
             claude-token.py \
             scripts/check_compatibility.py \
             scripts/configure_claude.py \
+            scripts/warp_celestial_launcher.py \
             tests/test_claude_token.py \
             tests/test_compatibility.py \
             tests/test_configure_claude.py \
-            tests/test_install_script.py
+            tests/test_install_script.py \
+            tests/test_launcher.py
       - name: Validate release compatibility manifest
         run: python scripts/check_compatibility.py
       - name: Run Python tests
@@ -59,6 +61,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       WARP_CHANNEL: oss
       WARP_BIN_NAME: warp-oss
+      MACOSX_DEPLOYMENT_TARGET: "10.14"
     steps:
       - name: Check out Warp Celestial
         uses: actions/checkout@v7
