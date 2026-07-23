@@ -39,11 +39,19 @@ cd warp-celestial
 ./install.sh --check
 ```
 
+同时诊断依赖环境和现有安装：
+
+```bash
+./install.sh --doctor
+```
+
 常用选项：
 
 ```text
 --skip-claude-config    不修改 Claude Code 配置
 --no-launch             安装完成后不启动应用
+--clean-build-cache     清理编译产物，但保留已经安装的应用
+--uninstall             安全卸载应用及其管理的 Claude 集成
 --yes                   自动接受询问；非交互安装时必须显式提供
 ```
 
@@ -62,6 +70,8 @@ cd warp-celestial
    `~/.local/bin/warp-celestial`。
 7. 经用户确认后，备份 `~/.claude/settings.json`，更新顶层 `statusLine`，
    并合并 `SessionStart`/`SessionEnd` 生命周期 hooks，保留其他配置和 hooks。
+8. 记录本项目实际拥有的 Claude 配置，卸载时可恢复原状态栏，同时不会覆盖安装后
+   用户继续做出的配置修改。
 
 安装器支持重复运行，会复用固定版本的源码和 Cargo 编译缓存。如果无法验证
 固定提交和补丁状态，它会停止并报告，不会 reset 或删除源码目录。
@@ -256,17 +266,22 @@ find ~/.cache/warp/blackhole_contexts -maxdepth 3 -name '*.context' -print -exec
 
 ## 卸载
 
-保存需要的内容后，删除这些由项目管理的路径：
+运行：
 
-```text
-~/Applications/Warp Celestial.app
-~/.local/bin/warp-celestial
-~/.local/share/warp-celestial
-~/.cache/warp/blackhole_contexts
+```bash
+./install.sh --uninstall
 ```
 
-然后恢复带时间戳的 `~/.claude/settings.json.backup.*`，或者删除本项目加入的
-`statusLine` 字段以及两个生命周期 hook 命令。
+卸载器会删除应用、启动器、受管理的源码/构建目录和上下文缓存，并且只删除本项目
+实际安装的 Claude hooks。如果安装时替换了原有状态栏，只有当前值仍由 Warp
+Celestial 管理时才会恢复旧值；安装后用户自行修改的值会保留。带时间戳的 Claude
+配置备份不会被删除。
+
+如果只想释放 Cargo 编译目录占用的空间，同时保留已安装应用：
+
+```bash
+./install.sh --clean-build-cache
+```
 
 ## 仓库内容
 

@@ -85,6 +85,127 @@ class ConfigureClaudeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "hooks setting must be a JSON object"):
             configure_claude.ensure_lifecycle_hook({"hooks": []}, "SessionStart", "hook")
 
+    def test_unconfigure_restores_previous_status_line_and_preserves_other_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = Path(directory) / "settings.json"
+            state_path = Path(directory) / "install-state.json"
+            hook_path = Path(directory) / "claude-token.py"
+            original = {
+                "theme": "dark",
+                "statusLine": {"type": "command", "command": "my-status"},
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": "existing-hook"}]}
+                    ]
+                },
+            }
+            settings_path.write_text(json.dumps(original), encoding="utf-8")
+
+            configure_claude.configure(settings_path, hook_path, state_path)
+            changed, backup = configure_claude.unconfigure(
+                settings_path, hook_path, state_path
+            )
+
+            self.assertTrue(changed)
+            self.assertIsNotNone(backup)
+            self.assertEqual(
+                json.loads(settings_path.read_text(encoding="utf-8")), original
+            )
+
+    def test_unconfigure_preserves_status_line_changed_after_install(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = Path(directory) / "settings.json"
+            state_path = Path(directory) / "install-state.json"
+            hook_path = Path(directory) / "claude-token.py"
+            settings_path.write_text(
+                json.dumps(
+                    {"statusLine": {"type": "command", "command": "original-status"}}
+                ),
+                encoding="utf-8",
+            )
+            configure_claude.configure(settings_path, hook_path, state_path)
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+            settings["statusLine"] = {"type": "command", "command": "new-user-status"}
+            settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+            configure_claude.unconfigure(settings_path, hook_path, state_path)
+
+            updated = json.loads(settings_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                updated["statusLine"],
+                {"type": "command", "command": "new-user-status"},
+            )
+            self.assertNotIn("hooks", updated)
+
+    def test_unconfigure_does_not_remove_preexisting_matching_hook(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = Path(directory) / "settings.json"
+            state_path = Path(directory) / "install-state.json"
+            hook_path = Path(directory) / "claude-token.py"
+            command = shlex.quote(str(hook_path.resolve()))
+            original = {
+                "statusLine": {"type": "command", "command": command},
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": command}]}
+                    ],
+                    "SessionEnd": [
+                        {"hooks": [{"type": "command", "command": command}]}
+                    ],
+                },
+            }
+            settings_path.write_text(json.dumps(original), encoding="utf-8")
+
+            configure_claude.configure(settings_path, hook_path, state_path)
+            changed, _ = configure_claude.unconfigure(
+                settings_path, hook_path, state_path
+            )
+
+            self.assertFalse(changed)
+            self.assertEqual(
+                json.loads(settings_path.read_text(encoding="utf-8")), original
+            )
+
+    def test_legacy_unconfigure_removes_only_exact_managed_commands(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = Path(directory) / "settings.json"
+            hook_path = Path(directory) / "claude-token.py"
+            command = shlex.quote(str(hook_path.resolve()))
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "theme": "dark",
+                        "statusLine": {"type": "command", "command": command},
+                        "hooks": {
+                            "SessionStart": [
+                                {
+                                    "hooks": [
+                                        {"type": "command", "command": command},
+                                        {"type": "command", "command": "keep-me"},
+                                    ]
+                                }
+                            ],
+                            "SessionEnd": [
+                                {"hooks": [{"type": "command", "command": command}]}
+                            ],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            changed, _ = configure_claude.unconfigure(settings_path, hook_path)
+
+            self.assertTrue(changed)
+            updated = json.loads(settings_path.read_text(encoding="utf-8"))
+            self.assertEqual(updated["theme"], "dark")
+            self.assertNotIn("statusLine", updated)
+            self.assertEqual(
+                updated["hooks"]["SessionStart"],
+                [{"hooks": [{"type": "command", "command": "keep-me"}]}],
+            )
+            self.assertNotIn("SessionEnd", updated["hooks"])
+
 
 if __name__ == "__main__":
     unittest.main()

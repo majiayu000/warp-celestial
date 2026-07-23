@@ -42,11 +42,19 @@ To check the machine without installing anything:
 ./install.sh --check
 ```
 
+To diagnose both prerequisites and an existing installation:
+
+```bash
+./install.sh --doctor
+```
+
 Useful options:
 
 ```text
 --skip-claude-config    Build the app without editing Claude Code settings
 --no-launch             Do not open the app after installation
+--clean-build-cache     Reclaim compiled build space without uninstalling the app
+--uninstall             Safely remove the app and its managed Claude integration
 --yes                   Accept prompts; required for non-interactive installation
 ```
 
@@ -66,6 +74,8 @@ Useful options:
 7. With confirmation, backs up `~/.claude/settings.json`, adds the top-level
    `statusLine` command, and merges `SessionStart`/`SessionEnd` lifecycle hooks
    without changing unrelated settings or hooks.
+8. Records which Claude settings it owns, allowing uninstall to restore a
+   previous status line without overwriting changes made after installation.
 
 The installer is repeatable. Running it again reuses the pinned source checkout
 and Cargo build cache. If it cannot verify the pinned commit and patch state, it
@@ -281,17 +291,23 @@ work you need, then run the installer again.
 
 ## Removing the local installation
 
-After saving anything you need, remove these project-owned paths:
+Run:
 
-```text
-~/Applications/Warp Celestial.app
-~/.local/bin/warp-celestial
-~/.local/share/warp-celestial
-~/.cache/warp/blackhole_contexts
+```bash
+./install.sh --uninstall
 ```
 
-Restore the timestamped `~/.claude/settings.json.backup.*` file, or remove the
-`statusLine` entry and the two lifecycle hook commands added by this project.
+The uninstaller removes the app, launcher, managed source/build directory and
+context cache. It removes only the exact Claude hooks installed by this project.
+If the installer replaced an earlier status line, it restores that value only
+when the current value is still managed by Warp Celestial; later user edits are
+left untouched. Timestamped Claude settings backups are preserved.
+
+To keep the installed app but reclaim the large Cargo build directory:
+
+```bash
+./install.sh --clean-build-cache
+```
 
 ## Repository contents
 
