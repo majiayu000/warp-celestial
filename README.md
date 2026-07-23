@@ -182,9 +182,10 @@ that texture and runs one of two fragment shaders:
 
 - `blackhole_fragment`: numerically integrated Schwarzschild geodesics,
   physically captured rays, multi-image accretion disk, blackbody temperature,
-  Doppler shift/beaming, time dilation and weak-field lensing
-- `sun_fragment`: limb-darkened photosphere, granulation, sunspots, corona and
-  procedural embers
+  Doppler shift/beaming, time dilation, traced photon-sphere caustics, turbulent
+  bright knots and weak-field lensing
+- `sun_fragment`: limb-darkened photosphere, granulation, sunspots, corona,
+  magnetic prominence arches and quality-scaled procedural embers
 
 Set `WARP_CELESTIAL=sun` before launch to select the sun. Any other value selects
 the black hole. The focused pane publishes a zero-sized transparent marker into
@@ -204,8 +205,10 @@ This costs more GPU time and memory bandwidth than stock Warp because an active
 effect adds a full-screen pass, and pixels near the hole integrate 24-48 ray
 steps. Pixels in the protected bottom work area exit early; distant pixels use
 a cheaper analytic approximation. Larger Retina windows and high-refresh-rate
-displays cost more. Use `low` on a laptop or `high` for recordings; close the
-custom app or end the focused Claude session to stop continuous rendering.
+displays cost more. Sun particles are capped at 12, 20 or 28 for low, balanced
+or high quality and are evaluated only close to the star. Use `low` on a laptop
+or `high` for recordings; close the custom app or end the focused Claude
+session to stop continuous rendering.
 
 ### Tabs, panes and concurrent sessions
 

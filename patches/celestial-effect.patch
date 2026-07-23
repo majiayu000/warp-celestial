@@ -1999,7 +1999,7 @@ new file mode 100644
 index 000000000..4b0b7d2b3
 --- /dev/null
 +++ b/crates/warpui/src/platform/mac/rendering/metal/shaders/celestial_blackhole.metal
-@@ -0,0 +1,338 @@
+@@ -0,0 +1,359 @@
 +// Schwarzschild black-hole post-process for Warp Celestial.
 +//
 +// Adapted from s0xDk/ghostty-blackhole's blackhole.glsl, which is based on
@@ -2025,6 +2025,7 @@ index 000000000..4b0b7d2b3
 +constant float BH_DISK_WIND = 7.0;
 +constant float BH_DISK_CONTRAST = 1.6;
 +constant float BH_EXPOSURE = 1.4;
++constant float BH_CAUSTIC_GAIN = 0.16;
 +constant float BH_WORK_AREA = 0.33;
 +constant float BH_DILATION_MIN = 0.20;
 +constant float BH_AREA_MIN = 0.0006;
@@ -2215,6 +2216,8 @@ index 000000000..4b0b7d2b3
 +    float3 emitted = float3(0.0);
 +    float transmittance = 1.0;
 +    bool captured = false;
++    float closest_radius = camera_distance;
++    uint disk_crossings = 0u;
 +    float previous_side = dot(ray_position, disk_normal);
 +    float3 previous_position = ray_position;
 +    float dilation = mix(1.0, BH_DILATION_MIN, intensity);
@@ -2237,6 +2240,7 @@ index 000000000..4b0b7d2b3
 +        }
 +
 +        float radius = sqrt(radius_squared);
++        closest_radius = min(closest_radius, radius);
 +        float delta = clamp(0.16 * radius, 0.03, 1.5);
 +        float3 acceleration = -1.5 * angular_momentum_squared * ray_position
 +            / (radius_squared * radius_squared * radius);
@@ -2278,7 +2282,15 @@ index 000000000..4b0b7d2b3
 +                            crossing_radius,
 +                            turns * 9.0 + swirl * 1.5 + 7.0),
 +                        9.0) * 0.35;
-+                streaks = 0.35 + BH_DISK_CONTRAST * streaks * streaks;
++                float turbulence = bh_noise_wrap_y(
++                    float2(
++                        crossing_radius * 5.2 - swirl * 0.7,
++                        turns * 31.0 + swirl * 4.5),
++                    31.0);
++                float bright_knots = smoothstep(0.72, 0.94, turbulence);
++                streaks = 0.30
++                    + BH_DISK_CONTRAST * streaks * streaks
++                    + 0.85 * bright_knots;
 +
 +                float3 gas_direction = normalize(cross(disk_normal, crossing));
 +                float beta = clamp(
@@ -2299,7 +2311,9 @@ index 000000000..4b0b7d2b3
 +                float3 blackbody = bh_blackbody(
 +                    BH_DISK_TEMPERATURE * temperature_profile * shift);
 +                float boost = pow(shift, BH_DISK_BEAM);
-+                float density = band * streaks;
++                float image_order = float(disk_crossings);
++                float image_gain = 1.0 / (1.0 + 0.28 * image_order);
++                float density = band * streaks * image_gain;
 +                emitted += transmittance * blackbody
 +                    * (BH_DISK_GAIN * 2.2 * density
 +                        * temperature_profile * temperature_profile * boost);
@@ -2307,6 +2321,7 @@ index 000000000..4b0b7d2b3
 +                    BH_DISK_OPACITY * density,
 +                    0.0,
 +                    1.0);
++                disk_crossings += 1u;
 +            }
 +        }
 +        previous_side = side;
@@ -2316,6 +2331,12 @@ index 000000000..4b0b7d2b3
 +    if (!captured && dot(ray_position, ray_position) < 4.0) {
 +        captured = true;
 +    }
++
++    // Rays that skim the r=1.5 photon sphere form the narrow caustic ring.
++    // This is derived from the traced closest approach, not a screen-space halo.
++    float photon_caustic = exp(-pow((closest_radius - 1.5) / 0.075, 2.0));
++    emitted += float3(1.0, 0.52, 0.16)
++        * photon_caustic * BH_CAUSTIC_GAIN * intensity * transmittance;
 +
 +    float3 background = float3(0.0);
 +    if (!captured) {
@@ -2363,7 +2384,7 @@ diff --git a/crates/warpui/src/platform/mac/rendering/metal/shaders/shaders.meta
 index 8b3eef7ac..821bd839b 100644
 --- a/crates/warpui/src/platform/mac/rendering/metal/shaders/shaders.metal
 +++ b/crates/warpui/src/platform/mac/rendering/metal/shaders/shaders.metal
-@@ -400,3 +400,179 @@ fragment float4 glyph_fragment_shader(
+@@ -400,3 +400,202 @@ fragment float4 glyph_fragment_shader(
      color.a *= saturate(in.fade_alpha);
      return color;
  }
@@ -2473,6 +2494,23 @@ index 8b3eef7ac..821bd839b 100644
 +    float chromo = exp(-pow((rn - 1.0) / 0.04, 2.0)) * limb_noise;
 +    col += float3(1.0, 0.55, 0.18) * chromo * 1.0 * fill;
 +
++    // Localized magnetic prominences form thin arches above the limb. The
++    // radius gate keeps this three-arc loop away from almost all pixels.
++    if (rn > 0.94 && rn < 1.65) {
++        float prominence = 0.0;
++        for (int i = 0; i < 3; i++) {
++            float fi = float(i);
++            float anchor = cel_hash(float2(fi, 11.3)) * 6.2831853;
++            float span = 0.18 + 0.10 * cel_hash(float2(fi, 12.7));
++            float delta = atan2(sin(ang - anchor), cos(ang - anchor));
++            float phase = saturate((delta + span) / (2.0 * span));
++            float arch = 1.01 + (0.18 + 0.12 * fi) * sin(phase * 3.1415927);
++            float within_arc = step(abs(delta), span);
++            prominence += exp(-pow((rn - arch) / 0.018, 2.0)) * within_arc;
++        }
++        col += float3(1.0, 0.34, 0.08) * prominence * (0.7 + 0.5 * fill);
++    }
++
 +    // Pulsing active regions near the limb (耀斑脉动), kept subtle.
 +    float active = cel_fbm(circ * 3.5 + float2(-time * 0.2, time * 0.15));
 +    active = smoothstep(0.62, 0.92, active);
@@ -2485,7 +2523,13 @@ index 8b3eef7ac..821bd839b 100644
 +    // radius cull skips the loop on pixels far from the sun to protect the frame
 +    // rate.
 +    if (r < r_sun * 3.0) {
-+        for (int i = 0; i < 32; i++) {
++        uint ember_count = uniforms->trace_steps <= 24u
++            ? 12u
++            : (uniforms->trace_steps <= 36u ? 20u : 28u);
++        for (uint i = 0u; i < 28u; i++) {
++            if (i >= ember_count) {
++                break;
++            }
 +            float fi = float(i);
 +            float a0 = cel_hash(float2(fi, 1.7)) * 6.2831853;
 +            float spd = 0.15 + cel_hash(float2(fi, 3.1)) * 0.35;

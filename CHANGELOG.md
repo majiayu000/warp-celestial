@@ -5,6 +5,13 @@ All notable changes to Warp Celestial are documented here. Versions follow
 
 ## [Unreleased]
 
+### Changed
+
+- Added traced photon-sphere caustics and turbulent bright knots to the black
+  hole without increasing the configured geodesic step limits.
+- Added localized magnetic prominence arches to the sun and reduced procedural
+  ember counts to 12/20/28 for low/balanced/high quality.
+
 ## [0.1.0] - 2026-07-23
 
 ### Added
