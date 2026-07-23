@@ -31,6 +31,8 @@ All notable changes to Warp Celestial are documented here. Versions follow
   ownership markers and negative destructive-path tests.
 - Preserved the latest user status line across reinstall/uninstall cycles and
   stopped uninstall when an unowned Claude command still references the bridge.
+- Expired stale per-session context records after 24 hours, including legacy
+  float-only cache files, so unclean exits cannot leave a permanent pane value.
 - Persisted custom context-cache paths for the runtime bridge and moved the
   verified cargo-bundle revision into the project support directory.
 - Split release verification from write-enabled publication and required the
