@@ -209,10 +209,56 @@ class ContextFileTests(unittest.TestCase):
             self.assertIsNone(
                 claude_token.pane_fill(
                     record,
-                    current_time=1001.0 + claude_token.CONTEXT_RECORD_TTL_SECONDS,
+                    current_time=1000.0 + claude_token.CONTEXT_RECORD_TTL_SECONDS,
                 )
             )
             self.assertFalse(record.exists())
+
+    def test_pane_fill_expires_future_versioned_timestamp_after_clock_rollback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = Path(directory) / "pane" / "future.context"
+            claude_token.write_fill(record, 0.9, updated_at=1_000_000.0)
+
+            self.assertIsNone(claude_token.pane_fill(record, current_time=100.0))
+            self.assertFalse(record.exists())
+
+    def test_pane_fill_expires_future_legacy_mtime_after_clock_rollback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = Path(directory) / "pane" / "future-legacy.context"
+            record.parent.mkdir()
+            record.write_text("0.9\n", encoding="utf-8")
+            os.utime(record, (1_000_000.0, 1_000_000.0))
+
+            self.assertIsNone(claude_token.pane_fill(record, current_time=100.0))
+            self.assertFalse(record.exists())
+
+    def test_pane_fill_tolerates_small_future_clock_skew(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = Path(directory) / "pane" / "slightly-future.context"
+            current_time = 1000.0
+            claude_token.write_fill(
+                record,
+                0.4,
+                updated_at=current_time
+                + claude_token.CONTEXT_RECORD_FUTURE_SKEW_SECONDS,
+            )
+
+            self.assertEqual(
+                claude_token.pane_fill(record, current_time=current_time), 0.4
+            )
+            self.assertTrue(record.exists())
+
+    def test_pane_fill_rejects_invalid_aggregation_times(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = Path(directory) / "pane" / "session.context"
+            claude_token.write_fill(record, 0.4)
+
+            for current_time in (-1.0, float("nan"), float("inf")):
+                with self.subTest(current_time=current_time):
+                    with self.assertRaisesRegex(
+                        RuntimeError, "context aggregation time"
+                    ):
+                        claude_token.pane_fill(record, current_time=current_time)
 
     def test_pane_fill_reports_stale_record_cleanup_errors(self):
         with tempfile.TemporaryDirectory() as directory:

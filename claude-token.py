@@ -79,6 +79,7 @@ CONTEXT_DIR = configured_context_dir()
 CURSOR_BASE = (0xF0, 0xB0, 0x00)
 CONTEXT_RECORD_VERSION = 1
 CONTEXT_RECORD_TTL_SECONDS = 24 * 60 * 60
+CONTEXT_RECORD_FUTURE_SKEW_SECONDS = 5 * 60
 
 
 def context_fill(data: dict) -> float:
@@ -199,7 +200,10 @@ def _read_context_record(candidate: Path, current_time: float) -> Optional[float
 
     if not math.isfinite(fill) or not math.isfinite(updated_at) or updated_at < 0.0:
         raise ValueError(f"non-finite context record in {candidate}")
-    if current_time - updated_at > CONTEXT_RECORD_TTL_SECONDS:
+    if (
+        updated_at > current_time + CONTEXT_RECORD_FUTURE_SKEW_SECONDS
+        or current_time - updated_at >= CONTEXT_RECORD_TTL_SECONDS
+    ):
         candidate.unlink()
         return None
     return max(0.0, min(1.0, fill))
@@ -211,6 +215,8 @@ def _pane_fill_unlocked(
     maximum = None
     observed_at = time.time() if current_time is None else current_time
     try:
+        if not math.isfinite(observed_at) or observed_at < 0.0:
+            raise ValueError("context aggregation time must be finite and non-negative")
         records = record.parent.glob("*.context")
         for candidate in records:
             fill = _read_context_record(candidate, observed_at)
