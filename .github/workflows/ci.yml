@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  scripts:
+    name: Installer and context bridge
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.8"
+      - name: Validate shell syntax and style
+        run: |
+          bash -n install.sh
+          shellcheck install.sh
+      - name: Validate Python syntax
+        run: |
+          python -m py_compile \
+            claude-token.py \
+            scripts/configure_claude.py \
+            tests/test_claude_token.py \
+            tests/test_configure_claude.py \
+            tests/test_install_script.py
+      - name: Run Python tests
+        run: python -m unittest discover -s tests -v
+
+  metal_poc:
+    name: Standalone Metal proof of concept
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check and test the locked Rust project
+        run: |
+          cargo check --locked
+          cargo test --locked
+
+  warp_patch:
+    name: Warp patch, Metal shaders, and renderer tests
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      WARP_CHANNEL: oss
+      WARP_BIN_NAME: warp-oss
+    steps:
+      - name: Check out Warp Celestial
+        uses: actions/checkout@v7
+        with:
+          path: warp-celestial
+      - name: Check out the tested Warp revision
+        uses: actions/checkout@v7
+        with:
+          repository: warpdotdev/warp
+          ref: 69ce3728acae0b01c2f457b65a90c144664686aa
+          path: warp
+      - name: Apply and validate the renderer patch
+        run: |
+          git -C warp apply --check ../warp-celestial/patches/celestial-effect.patch
+          git -C warp apply ../warp-celestial/patches/celestial-effect.patch
+          git -C warp apply --reverse --check ../warp-celestial/patches/celestial-effect.patch
+      - name: Compile the combined Metal shader library
+        run: |
+          shader_dir="$PWD/warp/crates/warpui/src/platform/mac/rendering/metal/shaders"
+          xcrun -sdk macosx metal \
+            -I "$shader_dir" \
+            -c "$shader_dir/shaders.metal" \
+            -o "$RUNNER_TEMP/warp-celestial.air"
+          xcrun -sdk macosx metallib \
+            "$RUNNER_TEMP/warp-celestial.air" \
+            -o "$RUNNER_TEMP/warp-celestial.metallib"
+      - name: Run focused renderer tests
+        working-directory: warp
+        run: |
+          cargo test -p warp --lib signal_is_transparent_and_limited_to_the_focused_pane
+          cargo test -p warpui --lib celestial
+          cargo test -p warpui_core --lib signed_cursor_fill
+      - name: Reject warnings in patched libraries
+        working-directory: warp
+        run: cargo clippy -p warp -p warpui -p warpui_core --lib -- -D warnings
