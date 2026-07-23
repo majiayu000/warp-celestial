@@ -240,6 +240,60 @@ class InstallScriptTests(unittest.TestCase):
             self.assertTrue(hook.exists())
             self.assertTrue(support.exists())
 
+    def test_uninstall_refuses_user_edited_wrapper_referencing_bridge(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "home"
+            support = home / ".local" / "share" / "warp-celestial"
+            settings = home / ".claude" / "settings.json"
+            hook = support / "claude-token.py"
+            state = support / "claude-settings-state.json"
+            write_marker(support)
+            shutil.copy2(BRIDGE, hook)
+            hook.chmod(0o755)
+
+            subprocess.run(
+                [
+                    "python3",
+                    str(CONFIGURATOR),
+                    str(settings),
+                    str(hook),
+                    str(state),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            configured = json.loads(settings.read_text(encoding="utf-8"))
+            configured["statusLine"] = {
+                "type": "command",
+                "command": f"python3 '{hook.resolve()}' --compact",
+            }
+            settings.write_text(json.dumps(configured), encoding="utf-8")
+
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "HOME": str(home),
+                    "WARP_CELESTIAL_HOME": str(support),
+                    "CLAUDE_SETTINGS_FILE": str(settings),
+                }
+            )
+            result = subprocess.run(
+                [str(INSTALLER), "--uninstall", "--yes"],
+                cwd=REPOSITORY,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("still references the bridge", result.stderr)
+            self.assertTrue(hook.exists())
+            self.assertTrue(support.exists())
+            remaining = json.loads(settings.read_text(encoding="utf-8"))
+            self.assertEqual(remaining["statusLine"], configured["statusLine"])
+
 
 if __name__ == "__main__":
     unittest.main()

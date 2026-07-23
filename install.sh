@@ -452,14 +452,45 @@ remove_download_stage() {
 settings_reference_hook() {
   python3 - "$CLAUDE_SETTINGS" "$HOOK_PATH" <<'PY'
 import json
+import os
 import shlex
 import sys
 from pathlib import Path
 
-settings = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-command = shlex.quote(str(Path(sys.argv[2]).expanduser().resolve()))
+hook = Path(sys.argv[2]).expanduser().resolve()
+
+
+def command_references_hook(command):
+    if not isinstance(command, str):
+        return False
+    if str(hook) in command:
+        return True
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        # An unparseable command cannot be proven independent of the bridge.
+        return True
+    for token in tokens:
+        expanded = os.path.expandvars(os.path.expanduser(token))
+        if expanded == str(hook):
+            return True
+        if expanded.startswith("/"):
+            try:
+                if Path(expanded).resolve() == hook:
+                    return True
+            except OSError:
+                return True
+    return False
+
+
+try:
+    settings = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    # Preserve the bridge when settings cannot be inspected reliably.
+    sys.exit(0)
+
 status = settings.get("statusLine")
-if isinstance(status, dict) and status.get("command") == command:
+if isinstance(status, dict) and command_references_hook(status.get("command")):
     sys.exit(0)
 hooks = settings.get("hooks", {})
 if isinstance(hooks, dict):
@@ -473,7 +504,7 @@ if isinstance(hooks, dict):
             if any(
                 isinstance(item, dict)
                 and item.get("type") == "command"
-                and item.get("command") == command
+                and command_references_hook(item.get("command"))
                 for item in commands
             ):
                 sys.exit(0)
