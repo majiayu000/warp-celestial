@@ -235,7 +235,10 @@ tabs and split panes publish independent cursor signals. Warp renders only the
 active tab, and only the focused split publishes an invisible scene marker, so
 changing tab or split focus changes the window-wide effect to that pane's level.
 An active pane with no Claude signal fades the effect out after the short signal
-grace period.
+grace period. Session records carry a last-update timestamp and expire after 24
+hours, so a Claude or terminal crash that skips `SessionEnd` cannot leave a
+permanent stale maximum. Legacy float-only records use their file modification
+time for the same expiry rule.
 
 ## Manual installation
 

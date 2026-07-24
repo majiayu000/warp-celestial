@@ -1,6 +1,9 @@
 import errno
 import importlib.util
+import io
+import json
 import os
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -119,9 +122,22 @@ class ContextFileTests(unittest.TestCase):
     def test_write_fill_replaces_the_file_and_leaves_no_temporary_file(self):
         with tempfile.TemporaryDirectory() as directory:
             context_file = Path(directory) / "nested" / "session.context"
-            claude_token.write_fill(context_file, 0.625)
-            self.assertEqual(context_file.read_text(encoding="utf-8"), "0.625000\n")
+            claude_token.write_fill(context_file, 0.625, updated_at=1234.5)
+            self.assertEqual(
+                json.loads(context_file.read_text(encoding="utf-8")),
+                {"version": 1, "fill": 0.625, "updated_at": 1234.5},
+            )
             self.assertEqual(list(context_file.parent.glob(".session.context.*")), [])
+
+    def test_write_fill_rejects_invalid_timestamps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            context_file = Path(directory) / "pane" / "session.context"
+            for timestamp in (-1.0, float("nan"), float("inf")):
+                with self.subTest(timestamp=timestamp):
+                    with self.assertRaisesRegex(ValueError, "timestamp"):
+                        claude_token.write_fill(
+                            context_file, 0.625, updated_at=timestamp
+                        )
 
     def test_remove_fill_only_removes_the_selected_session(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -134,7 +150,9 @@ class ContextFileTests(unittest.TestCase):
             claude_token.remove_fill(first)
 
             self.assertFalse(first.exists())
-            self.assertEqual(second.read_text(encoding="utf-8"), "0.200000\n")
+            self.assertEqual(
+                json.loads(second.read_text(encoding="utf-8"))["fill"], 0.2
+            )
 
     def test_remove_fill_accepts_a_missing_file(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -153,6 +171,184 @@ class ContextFileTests(unittest.TestCase):
             self.assertEqual(claude_token.pane_fill(second), 0.2)
             claude_token.remove_fill(second)
             self.assertIsNone(claude_token.pane_fill(second))
+
+    def test_pane_fill_removes_expired_versioned_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pane = Path(directory) / "pane"
+            stale = pane / "stale.context"
+            live = pane / "live.context"
+            expiry = claude_token.CONTEXT_RECORD_TTL_SECONDS
+            claude_token.write_fill(stale, 0.9, updated_at=100.0)
+            claude_token.write_fill(live, 0.3, updated_at=100.0 + expiry)
+
+            self.assertEqual(
+                claude_token.pane_fill(live, current_time=101.0 + expiry),
+                0.3,
+            )
+            self.assertFalse(stale.exists())
+            self.assertTrue(live.exists())
+
+    def test_pane_fill_accepts_fresh_legacy_float_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = Path(directory) / "pane" / "legacy.context"
+            record.parent.mkdir()
+            record.write_text("0.75\n", encoding="utf-8")
+            os.utime(record, (1000.0, 1000.0))
+
+            self.assertEqual(
+                claude_token.pane_fill(record, current_time=1001.0), 0.75
+            )
+
+    def test_pane_fill_expires_legacy_records_by_mtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = Path(directory) / "pane" / "legacy.context"
+            record.parent.mkdir()
+            record.write_text("0.75\n", encoding="utf-8")
+            os.utime(record, (1000.0, 1000.0))
+
+            self.assertIsNone(
+                claude_token.pane_fill(
+                    record,
+                    current_time=1000.0 + claude_token.CONTEXT_RECORD_TTL_SECONDS,
+                )
+            )
+            self.assertFalse(record.exists())
+
+    def test_pane_fill_expires_future_versioned_timestamp_after_clock_rollback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = Path(directory) / "pane" / "future.context"
+            claude_token.write_fill(record, 0.9, updated_at=1_000_000.0)
+
+            self.assertIsNone(claude_token.pane_fill(record, current_time=100.0))
+            self.assertFalse(record.exists())
+
+    def test_pane_fill_expires_future_legacy_mtime_after_clock_rollback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = Path(directory) / "pane" / "future-legacy.context"
+            record.parent.mkdir()
+            record.write_text("0.9\n", encoding="utf-8")
+            os.utime(record, (1_000_000.0, 1_000_000.0))
+
+            self.assertIsNone(claude_token.pane_fill(record, current_time=100.0))
+            self.assertFalse(record.exists())
+
+    def test_pane_fill_tolerates_small_future_clock_skew(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = Path(directory) / "pane" / "slightly-future.context"
+            current_time = 1000.0
+            claude_token.write_fill(
+                record,
+                0.4,
+                updated_at=current_time
+                + claude_token.CONTEXT_RECORD_FUTURE_SKEW_SECONDS,
+            )
+
+            self.assertEqual(
+                claude_token.pane_fill(record, current_time=current_time), 0.4
+            )
+            self.assertTrue(record.exists())
+
+    def test_pane_fill_rejects_invalid_aggregation_times(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = Path(directory) / "pane" / "session.context"
+            claude_token.write_fill(record, 0.4)
+
+            for current_time in (-1.0, float("nan"), float("inf")):
+                with self.subTest(current_time=current_time):
+                    with self.assertRaisesRegex(
+                        RuntimeError, "context aggregation time"
+                    ):
+                        claude_token.pane_fill(record, current_time=current_time)
+
+    def test_pane_fill_reports_stale_record_cleanup_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = Path(directory) / "pane" / "stale.context"
+            claude_token.write_fill(record, 0.9, updated_at=100.0)
+
+            with mock.patch.object(
+                Path, "unlink", side_effect=PermissionError("permission denied")
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "unable to aggregate context records"
+                ):
+                    claude_token.pane_fill(
+                        record,
+                        current_time=101.0
+                        + claude_token.CONTEXT_RECORD_TTL_SECONDS,
+                    )
+
+    def test_pane_fill_rejects_malformed_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = Path(directory) / "pane" / "broken.context"
+            record.parent.mkdir()
+            record.write_text('{"version":1,"fill":"high"}\n', encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                RuntimeError, "unable to aggregate context records"
+            ):
+                claude_token.pane_fill(record)
+
+    def test_session_start_refreshes_current_record_and_cleans_stale_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            context_dir = Path(directory) / "blackhole_contexts"
+            pane_id = "550e8400e29b41d4a716446655440000"
+            pane = context_dir / pane_id
+            pane.mkdir(parents=True)
+            stale = pane / "stale.context"
+            stale.write_text("0.95\n", encoding="utf-8")
+            os.utime(stale, (100.0, 100.0))
+            observed_at = 101.0 + claude_token.CONTEXT_RECORD_TTL_SECONDS
+            event = {
+                "hook_event_name": "SessionStart",
+                "session_id": "new-session",
+            }
+
+            with mock.patch.object(
+                claude_token, "CONTEXT_DIR", context_dir
+            ), mock.patch.dict(
+                os.environ, {"WARP_TERMINAL_SESSION_UUID": pane_id}, clear=True
+            ), mock.patch.object(
+                sys, "stdin", io.StringIO(json.dumps(event))
+            ), mock.patch.object(
+                claude_token.time, "time", return_value=observed_at
+            ), mock.patch.object(
+                claude_token, "emit_cursor", return_value=True
+            ):
+                self.assertEqual(claude_token.main(), 0)
+
+            records = list(pane.glob("*.context"))
+            self.assertEqual(len(records), 1)
+            self.assertNotEqual(records[0], stale)
+            self.assertEqual(
+                json.loads(records[0].read_text(encoding="utf-8"))["fill"],
+                0.0,
+            )
+
+    def test_session_end_removes_current_record_and_resets_empty_pane(self):
+        with tempfile.TemporaryDirectory() as directory:
+            context_dir = Path(directory) / "blackhole_contexts"
+            pane_id = "550e8400e29b41d4a716446655440000"
+            event = {
+                "hook_event_name": "SessionEnd",
+                "session_id": "ending-session",
+            }
+            with mock.patch.object(
+                claude_token, "CONTEXT_DIR", context_dir
+            ), mock.patch.dict(
+                os.environ, {"WARP_TERMINAL_SESSION_UUID": pane_id}, clear=True
+            ):
+                record = claude_token.context_record(event)
+                assert record is not None
+                claude_token.write_fill(record, 0.8)
+                with mock.patch.object(
+                    sys, "stdin", io.StringIO(json.dumps(event))
+                ), mock.patch.object(
+                    claude_token, "emit_cursor", return_value=True
+                ) as emit_cursor:
+                    self.assertEqual(claude_token.main(), 0)
+
+            self.assertFalse(record.exists())
+            emit_cursor.assert_called_once_with(None)
 
     def test_cache_operations_take_and_release_an_exclusive_lock(self):
         with tempfile.TemporaryDirectory() as directory:

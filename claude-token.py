@@ -33,10 +33,12 @@ import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
@@ -75,6 +77,9 @@ CONTEXT_DIR = configured_context_dir()
 # The high nibbles are a signature; the low nibbles hold a quantized fill and
 # checksum so ordinary theme cursor colors cannot activate the effect.
 CURSOR_BASE = (0xF0, 0xB0, 0x00)
+CONTEXT_RECORD_VERSION = 1
+CONTEXT_RECORD_TTL_SECONDS = 24 * 60 * 60
+CONTEXT_RECORD_FUTURE_SKEW_SECONDS = 5 * 60
 
 
 def context_fill(data: dict) -> float:
@@ -126,9 +131,19 @@ def cache_lock(record: Path):
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
-def write_fill(record: Path, level: float) -> None:
+def write_fill(
+    record: Path, level: float, updated_at: Optional[float] = None
+) -> None:
     """Atomically write the fill level to one Claude session record."""
     level = max(0.0, min(1.0, level))
+    timestamp = time.time() if updated_at is None else updated_at
+    if not math.isfinite(timestamp) or timestamp < 0.0:
+        raise ValueError("context record timestamp must be finite and non-negative")
+    payload = {
+        "version": CONTEXT_RECORD_VERSION,
+        "fill": level,
+        "updated_at": timestamp,
+    }
     with cache_lock(record):
         record.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_name = tempfile.mkstemp(
@@ -136,7 +151,8 @@ def write_fill(record: Path, level: float) -> None:
         )
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as temporary_file:
-                temporary_file.write(f"{level:.6f}\n")
+                json.dump(payload, temporary_file, separators=(",", ":"), sort_keys=True)
+                temporary_file.write("\n")
             os.replace(temporary_name, record)
         except Exception:
             Path(temporary_name).unlink(missing_ok=True)
@@ -154,23 +170,68 @@ def remove_fill(record: Path) -> None:
                 raise
 
 
-def _pane_fill_unlocked(record: Path) -> Optional[float]:
-    maximum = None
+def _read_context_record(candidate: Path, current_time: float) -> Optional[float]:
+    """Read one current or legacy record and remove it when its lease expired."""
+    raw = candidate.read_text(encoding="utf-8").strip()
     try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"invalid JSON in {candidate}") from error
+
+    if isinstance(payload, (int, float)) and not isinstance(payload, bool):
+        fill = float(payload)
+        updated_at = candidate.stat().st_mtime
+    elif isinstance(payload, dict):
+        if payload.get("version") != CONTEXT_RECORD_VERSION:
+            raise ValueError(f"unsupported context record version in {candidate}")
+        fill_value = payload.get("fill")
+        updated_value = payload.get("updated_at")
+        if (
+            not isinstance(fill_value, (int, float))
+            or isinstance(fill_value, bool)
+            or not isinstance(updated_value, (int, float))
+            or isinstance(updated_value, bool)
+        ):
+            raise ValueError(f"invalid context record fields in {candidate}")
+        fill = float(fill_value)
+        updated_at = float(updated_value)
+    else:
+        raise ValueError(f"invalid context record in {candidate}")
+
+    if not math.isfinite(fill) or not math.isfinite(updated_at) or updated_at < 0.0:
+        raise ValueError(f"non-finite context record in {candidate}")
+    if (
+        updated_at > current_time + CONTEXT_RECORD_FUTURE_SKEW_SECONDS
+        or current_time - updated_at >= CONTEXT_RECORD_TTL_SECONDS
+    ):
+        candidate.unlink()
+        return None
+    return max(0.0, min(1.0, fill))
+
+
+def _pane_fill_unlocked(
+    record: Path, current_time: Optional[float] = None
+) -> Optional[float]:
+    maximum = None
+    observed_at = time.time() if current_time is None else current_time
+    try:
+        if not math.isfinite(observed_at) or observed_at < 0.0:
+            raise ValueError("context aggregation time must be finite and non-negative")
         records = record.parent.glob("*.context")
         for candidate in records:
-            fill = float(candidate.read_text(encoding="utf-8").strip())
-            fill = max(0.0, min(1.0, fill))
+            fill = _read_context_record(candidate, observed_at)
+            if fill is None:
+                continue
             maximum = fill if maximum is None else max(maximum, fill)
     except (OSError, ValueError) as error:
         raise RuntimeError(f"unable to aggregate context records: {error}") from error
     return maximum
 
 
-def pane_fill(record: Path) -> Optional[float]:
+def pane_fill(record: Path, current_time: Optional[float] = None) -> Optional[float]:
     """Return the highest live Claude fill in this Warp pane."""
     with cache_lock(record):
-        return _pane_fill_unlocked(record)
+        return _pane_fill_unlocked(record, current_time)
 
 
 def cursor_sequence(level: Optional[float]) -> bytes:
