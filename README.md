@@ -173,10 +173,11 @@ focused Warp tab / split pane
           |
           v
 Warp Metal renderer (smoothed 0.0-to-1.0 uniform)
-  1. render the normal scene to an offscreen BGRA texture
-  2. integrate near-field Schwarzschild photon paths per pixel
-  3. apply terminal lensing, repeated disk crossings and relativistic light
-  4. present the composited frame
+  1. render inactive scenes directly to the drawable
+  2. render active scenes to a reusable offscreen BGRA texture
+  3. integrate near-field Schwarzschild photon paths per pixel
+  4. apply terminal lensing, repeated disk crossings and relativistic light
+  5. present the composited frame
 ```
 
 ### Context bridge
@@ -197,9 +198,10 @@ to the inherited terminal instead of polluting the status-line output.
 
 ### Metal renderer
 
-The patch changes only Warp's macOS Metal backend. The normal terminal scene is
-rendered into a reusable offscreen texture. A second full-screen pass samples
-that texture and runs one of two fragment shaders:
+The patch changes only Warp's macOS Metal backend. While the effect is active,
+the normal terminal scene is rendered into a reusable offscreen texture. A
+second full-screen pass samples that texture and runs one of two fragment
+shaders:
 
 - `blackhole_fragment`: numerically integrated Schwarzschild geodesics,
   physically captured rays, multi-image accretion disk, blackbody temperature,
@@ -216,11 +218,13 @@ the renderer glides between context updates rather than changing size in one fra
 ### Resource use
 
 While the fill value is zero, the window uses Warp's normal event-driven redraw
-behavior and the effect is not continuously animated. While it is above zero,
-the window redraws at display rate so the shader can move. The implementation
-reuses the offscreen texture and preserves the cached scene between animation
-frames. Warp performs no filesystem scan: the pane-local value arrives in the
-scene it already renders.
+behavior, renders the scene directly to the drawable, and skips both the
+offscreen texture and celestial composite pass. It also releases a retained
+offscreen texture once the fade-out settles. While fill is above zero, the
+window redraws at display rate so the shader can move. The active path reuses
+the offscreen texture and preserves the cached scene between animation frames.
+Warp performs no filesystem scan: the pane-local value arrives in the scene it
+already renders.
 
 This costs more GPU time and memory bandwidth than stock Warp because an active
 effect adds a full-screen pass, and pixels near the hole integrate 24-48 ray
