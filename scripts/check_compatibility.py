@@ -15,6 +15,36 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 
 
+def package_version(manifest: str) -> Optional[str]:
+    package = re.search(
+        r"^\[package\]\s*$([\s\S]*?)(?=^\[|\Z)", manifest, re.MULTILINE
+    )
+    if package is None:
+        return None
+    version = re.search(
+        r'^version\s*=\s*"([^"]+)"\s*$', package.group(1), re.MULTILINE
+    )
+    return version.group(1) if version else None
+
+
+def locked_package_version(lockfile: str, name: str) -> Optional[str]:
+    for package in re.finditer(
+        r"^\[\[package\]\]\s*$([\s\S]*?)(?=^\[\[package\]\]|\Z)",
+        lockfile,
+        re.MULTILINE,
+    ):
+        package_name = re.search(
+            r'^name\s*=\s*"([^"]+)"\s*$', package.group(1), re.MULTILINE
+        )
+        if package_name is None or package_name.group(1) != name:
+            continue
+        version = re.search(
+            r'^version\s*=\s*"([^"]+)"\s*$', package.group(1), re.MULTILINE
+        )
+        return version.group(1) if version else None
+    return None
+
+
 def installer_constant(installer: str, name: str) -> Optional[str]:
     match = re.search(rf'^{re.escape(name)}="([^"]+)"$', installer, re.MULTILINE)
     return match.group(1) if match else None
@@ -28,11 +58,20 @@ def validate_repository(repository: Path) -> List[str]:
     except (OSError, json.JSONDecodeError) as error:
         return [f"cannot read {manifest_path}: {error}"]
 
-    version = (repository / "VERSION").read_text(encoding="utf-8").strip()
+    try:
+        version = (repository / "VERSION").read_text(encoding="utf-8").strip()
+        cargo_manifest = (repository / "Cargo.toml").read_text(encoding="utf-8")
+        cargo_lock = (repository / "Cargo.lock").read_text(encoding="utf-8")
+    except OSError as error:
+        return [f"cannot read version sources: {error}"]
     if manifest.get("schema_version") != 1:
         errors.append("unsupported compatibility schema")
     if manifest.get("project_version") != version:
         errors.append("VERSION and COMPATIBILITY.json disagree")
+    if package_version(cargo_manifest) != version:
+        errors.append("VERSION and Cargo.toml package version disagree")
+    if locked_package_version(cargo_lock, "blackhole-poc") != version:
+        errors.append("VERSION and Cargo.lock package version disagree")
 
     warp = manifest.get("warp")
     cargo_bundle = manifest.get("cargo_bundle")

@@ -5,6 +5,14 @@ All notable changes to Warp Celestial are documented here. Versions follow
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-12
+
+### Fixed
+
+- Recovered from the failed immutable `v0.1.0` tag by moving CI and release
+  ancestry checks to `main`, requiring an exact `vVERSION` tag on `main`, and
+  reserving `v0.1.1` as the first publishable release after this change merges.
+
 ### Added
 
 - Geodesic-traced black hole with terminal-content lensing, accretion-disk

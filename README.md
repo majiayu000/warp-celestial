@@ -88,16 +88,23 @@ stops instead of resetting or deleting the checkout.
 
 ## Releases and compatibility
 
-The current project version is `0.1.0`; no GitHub release has been published
-yet. `COMPATIBILITY.json` is the machine-checked source of truth for the project
-version, Warp commit, renderer patch digest, Rust toolchain and bundler
-revision. CI rejects drift between that manifest, `VERSION`, `install.sh` and
-the patch itself. A weekly non-mutating probe reports whether the same patch
-still applies to the latest public Warp `master`.
+The current project version is `0.1.1`; no successful GitHub release has been
+published yet. The existing `v0.1.0` tag triggered a failed release and is
+immutable: do not delete, move or reuse it. After this recovery change is
+merged and main CI passes, `v0.1.1` must be created from `main` as the first
+publishable recovery tag.
 
-After a controlled `v0.1.0` tag is created from `master`, the release workflow
-reruns the complete Python, Rust, Metal, Warp patch and clippy gates before
-publishing source plus a SHA-256 checksum. It does not publish a prebuilt app:
+`COMPATIBILITY.json` is the machine-checked source of truth for the project
+version, Warp commit, renderer patch digest, Rust toolchain and bundler
+revision. CI rejects drift between that manifest, `VERSION`, `Cargo.toml`,
+`Cargo.lock`, `install.sh` and the patch itself. A weekly non-mutating probe
+reports whether the same patch still applies to the latest public Warp
+`master`.
+
+For `v0.1.1` and later tags, the release workflow verifies that the exact
+`vVERSION` tag points to a commit contained in `main`, then reruns the complete
+Python, Rust, Metal, Warp patch and clippy gates before publishing source plus a
+SHA-256 checksum. It does not publish a prebuilt app:
 local builds are ad-hoc signed, and publishing a trusted binary requires an
 Apple Developer signing identity, notarization and the corresponding AGPL
 source distribution. The repository is licensed under AGPL-3.0; adapted MIT
