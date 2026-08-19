@@ -88,11 +88,10 @@ stops instead of resetting or deleting the checkout.
 
 ## Releases and compatibility
 
-The current project version is `0.1.1`; no successful GitHub release has been
-published yet. The existing `v0.1.0` tag triggered a failed release and is
-immutable: do not delete, move or reuse it. After this recovery change is
-merged and main CI passes, `v0.1.1` must be created from `main` as the first
-publishable recovery tag.
+The current project version is `0.1.1`. The existing `v0.1.0` tag triggered a
+failed release and is immutable: do not delete, move or reuse it. `v0.1.1` is
+the first publishable recovery release, and its tag must point to a `main`
+commit that passed CI.
 
 `COMPATIBILITY.json` is the machine-checked source of truth for the project
 version, Warp commit, renderer patch digest, Rust toolchain and bundler

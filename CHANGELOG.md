@@ -5,7 +5,7 @@ All notable changes to Warp Celestial are documented here. Versions follow
 
 ## [Unreleased]
 
-## [0.1.1] - 2026-08-12
+## [0.1.1] - 2026-08-20
 
 ### Fixed
 
