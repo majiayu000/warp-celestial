@@ -21,7 +21,11 @@ class CompatibilityTests(unittest.TestCase):
     def test_detects_patch_digest_drift(self):
         with tempfile.TemporaryDirectory() as directory:
             copy = Path(directory) / "repository"
-            shutil.copytree(REPOSITORY, copy, ignore=shutil.ignore_patterns(".git", "target"))
+            shutil.copytree(
+                REPOSITORY,
+                copy,
+                ignore=shutil.ignore_patterns(".git", "target"),
+            )
             manifest_path = copy / "COMPATIBILITY.json"
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             manifest["warp"]["patch_sha256"] = "0" * 64
@@ -36,7 +40,11 @@ class CompatibilityTests(unittest.TestCase):
     def test_detects_installer_pin_drift(self):
         with tempfile.TemporaryDirectory() as directory:
             copy = Path(directory) / "repository"
-            shutil.copytree(REPOSITORY, copy, ignore=shutil.ignore_patterns(".git", "target"))
+            shutil.copytree(
+                REPOSITORY,
+                copy,
+                ignore=shutil.ignore_patterns(".git", "target"),
+            )
             installer_path = copy / "install.sh"
             installer = installer_path.read_text(encoding="utf-8")
             installer_path.write_text(
@@ -52,6 +60,40 @@ class CompatibilityTests(unittest.TestCase):
             self.assertIn(
                 "WARP_COMMIT disagrees with COMPATIBILITY.json", errors
             )
+
+    def test_detects_cargo_manifest_version_drift(self):
+        with tempfile.TemporaryDirectory() as directory:
+            copy = Path(directory) / "repository"
+            shutil.copytree(REPOSITORY, copy, ignore=shutil.ignore_patterns(".git", "target"))
+            manifest_path = copy / "Cargo.toml"
+            manifest_path.write_text(
+                manifest_path.read_text(encoding="utf-8").replace(
+                    'version = "0.1.1"', 'version = "9.9.9"', 1
+                ),
+                encoding="utf-8",
+            )
+
+            errors = check_compatibility.validate_repository(copy)
+
+            self.assertIn("VERSION and Cargo.toml package version disagree", errors)
+
+    def test_detects_cargo_lock_version_drift(self):
+        with tempfile.TemporaryDirectory() as directory:
+            copy = Path(directory) / "repository"
+            shutil.copytree(REPOSITORY, copy, ignore=shutil.ignore_patterns(".git", "target"))
+            lock_path = copy / "Cargo.lock"
+            lock_path.write_text(
+                lock_path.read_text(encoding="utf-8").replace(
+                    'name = "blackhole-poc"\nversion = "0.1.1"',
+                    'name = "blackhole-poc"\nversion = "9.9.9"',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            errors = check_compatibility.validate_repository(copy)
+
+            self.assertIn("VERSION and Cargo.lock package version disagree", errors)
 
 
 if __name__ == "__main__":

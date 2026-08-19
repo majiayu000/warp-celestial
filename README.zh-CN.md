@@ -82,14 +82,19 @@ cd warp-celestial
 
 ## Release 与兼容性
 
-当前项目版本为 `0.1.0`，但尚未发布 GitHub Release。`COMPATIBILITY.json` 是
-项目版本、Warp 提交、renderer 补丁摘要、Rust 工具链及 bundler revision 的机器
-可检查事实源。CI 会拒绝该清单与 `VERSION`、`install.sh` 或补丁内容发生漂移。
-每周的只读检查还会报告当前补丁能否直接应用到公开 Warp `master` 最新提交。
+当前项目版本为 `0.1.1`。已有的 `v0.1.0` 标签曾触发失败的发布流程，现必须保持
+不变：不得删除、移动或复用。`v0.1.1` 是第一个可发布的恢复版本，其标签必须指向
+通过 CI 的 `main` 提交。
 
-后续从 `master` 创建受控的 `v0.1.0` 标签时，Release workflow 会重新执行完整的
-Python、Rust、Metal、Warp patch 与 clippy 门禁，再发布源码包和 SHA-256 校验值。
-它不会发布预编译应用。本地构建采用 ad-hoc 签名；要发布可信二进制，还需要 Apple
+`COMPATIBILITY.json` 是项目版本、Warp 提交、renderer 补丁摘要、Rust 工具链及
+bundler revision 的机器可检查事实源。CI 会拒绝该清单与 `VERSION`、
+`Cargo.toml`、`Cargo.lock`、`install.sh` 或补丁内容发生漂移。每周的只读检查还会
+报告当前补丁能否直接应用到公开 Warp `master` 最新提交。
+
+对于 `v0.1.1` 及后续标签，Release workflow 会先验证准确的 `vVERSION` 标签指向
+`main` 所包含的提交，再执行完整的 Python、Rust、Metal、Warp patch 与 clippy
+门禁，并发布源码包和 SHA-256 校验值。它不会发布预编译应用。本地构建采用
+ad-hoc 签名；要发布可信二进制，还需要 Apple
 Developer 签名、公证，以及与二进制对应的 AGPL 源码分发。仓库采用 AGPL-3.0，
 适配自 MIT 项目的部分继续记录在 `THIRD_PARTY_NOTICES.md`。
 

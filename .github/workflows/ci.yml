@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -31,13 +31,15 @@ jobs:
           python -m py_compile \
             claude-token.py \
             scripts/check_compatibility.py \
+            scripts/check_release_contract.py \
             scripts/configure_claude.py \
             scripts/warp_celestial_launcher.py \
             tests/test_claude_token.py \
             tests/test_compatibility.py \
             tests/test_configure_claude.py \
             tests/test_install_script.py \
-            tests/test_launcher.py
+            tests/test_launcher.py \
+            tests/test_release_contract.py
       - name: Validate release compatibility manifest
         run: python scripts/check_compatibility.py
       - name: Run Python tests
