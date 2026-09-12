@@ -44,8 +44,39 @@ from pathlib import Path
 from typing import Optional
 
 # Cache directory. Override it when testing or when Warp uses a nonstandard home.
-DEFAULT_CONTEXT_DIR = Path.home() / ".cache" / "warp" / "blackhole_contexts"
+CONTEXT_DIR_BASENAME = "blackhole_contexts"
+DEFAULT_CONTEXT_DIR = Path.home() / ".cache" / "warp" / CONTEXT_DIR_BASENAME
 CONTEXT_CONFIG_PATH = Path(__file__).resolve().with_name("context-cache-dir")
+
+
+def validate_dedicated_root_path(
+    path: Path, expected_name: str = CONTEXT_DIR_BASENAME
+) -> Path:
+    """Require an absolute path under $HOME whose basename matches expected_name.
+
+    Mirrors scripts/install_safety.sh assert_dedicated_root_path, including
+    realpath canonicalization for symlink and relative-segment parity.
+    """
+    if not path.is_absolute():
+        raise RuntimeError(f"context cache directory must be absolute: {path}")
+
+    canonical_target = Path(os.path.realpath(path))
+    canonical_home = Path(os.path.realpath(Path.home()))
+    if canonical_target.name != expected_name:
+        raise RuntimeError(
+            f"context cache directory must end in {expected_name}: {path}"
+        )
+    try:
+        canonical_target.relative_to(canonical_home)
+    except ValueError as error:
+        raise RuntimeError(
+            f"context cache directory must be below HOME ({canonical_home}): {path}"
+        ) from error
+    if canonical_target == canonical_home:
+        raise RuntimeError(
+            f"context cache directory must be below HOME ({canonical_home}): {path}"
+        )
+    return path
 
 
 def configured_context_dir() -> Path:
@@ -54,7 +85,7 @@ def configured_context_dir() -> Path:
         "WARP_CELESTIAL_CACHE_DIR"
     )
     if explicit:
-        return Path(explicit).expanduser()
+        return validate_dedicated_root_path(Path(explicit).expanduser())
     try:
         configured = CONTEXT_CONFIG_PATH.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
@@ -63,12 +94,17 @@ def configured_context_dir() -> Path:
         raise RuntimeError(
             f"unable to read context cache configuration: {error}"
         ) from error
-    configured_path = Path(configured).expanduser()
-    if not configured or not configured_path.is_absolute():
+    if not configured:
         raise RuntimeError(
             f"invalid context cache configuration in {CONTEXT_CONFIG_PATH}"
         )
-    return configured_path
+    configured_path = Path(configured).expanduser()
+    try:
+        return validate_dedicated_root_path(configured_path)
+    except RuntimeError as error:
+        raise RuntimeError(
+            f"invalid context cache configuration in {CONTEXT_CONFIG_PATH}"
+        ) from error
 
 
 CONTEXT_DIR = configured_context_dir()

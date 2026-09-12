@@ -19,20 +19,49 @@ SPEC.loader.exec_module(claude_token)
 
 class ContextDirectoryTests(unittest.TestCase):
     def test_explicit_cache_directory_takes_precedence(self):
+        explicit = Path.home() / ".cache" / "warp" / "blackhole_contexts"
         with mock.patch.dict(
             os.environ,
-            {"BLACKHOLE_CONTEXT_DIR": "/tmp/explicit-blackhole-contexts"},
+            {"BLACKHOLE_CONTEXT_DIR": str(explicit)},
             clear=True,
         ):
-            self.assertEqual(
-                claude_token.configured_context_dir(),
-                Path("/tmp/explicit-blackhole-contexts"),
-            )
+            self.assertEqual(claude_token.configured_context_dir(), explicit)
+
+    def test_relative_env_cache_directory_is_rejected(self):
+        with mock.patch.dict(
+            os.environ,
+            {"BLACKHOLE_CONTEXT_DIR": "relative/blackhole_contexts"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "must be absolute"):
+                claude_token.configured_context_dir()
+
+    def test_wrong_basename_env_cache_directory_is_rejected(self):
+        with mock.patch.dict(
+            os.environ,
+            {"BLACKHOLE_CONTEXT_DIR": str(Path.home() / "other_cache")},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "must end in blackhole_contexts"
+            ):
+                claude_token.configured_context_dir()
+
+    def test_outside_home_env_cache_directory_is_rejected(self):
+        with mock.patch.dict(
+            os.environ,
+            {"BLACKHOLE_CONTEXT_DIR": "/tmp/blackhole_contexts"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "must be below HOME"):
+                claude_token.configured_context_dir()
 
     def test_installed_cache_directory_is_loaded_from_managed_config(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "context-cache-dir"
-            configured_path = Path(directory) / "blackhole_contexts"
+            configured_path = (
+                Path.home() / ".cache" / "warp-celestial-test" / "blackhole_contexts"
+            )
             config_path.write_text(f"{configured_path}\n", encoding="utf-8")
             with mock.patch.object(
                 claude_token, "CONTEXT_CONFIG_PATH", config_path
