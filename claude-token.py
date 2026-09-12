@@ -219,7 +219,15 @@ def _pane_fill_unlocked(
             raise ValueError("context aggregation time must be finite and non-negative")
         records = record.parent.glob("*.context")
         for candidate in records:
-            fill = _read_context_record(candidate, observed_at)
+            try:
+                fill = _read_context_record(candidate, observed_at)
+            except ValueError as error:
+                print(
+                    f"removing invalid context record {candidate}: {error}",
+                    file=sys.stderr,
+                )
+                candidate.unlink()
+                continue
             if fill is None:
                 continue
             maximum = fill if maximum is None else max(maximum, fill)

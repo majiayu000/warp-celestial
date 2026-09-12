@@ -254,7 +254,8 @@ An active pane with no Claude signal fades the effect out after the short signal
 grace period. Session records carry a last-update timestamp and expire after 24
 hours, so a Claude or terminal crash that skips `SessionEnd` cannot leave a
 permanent stale maximum. Legacy float-only records use their file modification
-time for the same expiry rule.
+time for the same expiry rule. Corrupt or unsupported records are logged to
+stderr and removed during aggregation so one bad file cannot abort the pane.
 
 ## Manual installation
 

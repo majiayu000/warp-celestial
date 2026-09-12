@@ -277,16 +277,112 @@ class ContextFileTests(unittest.TestCase):
                         + claude_token.CONTEXT_RECORD_TTL_SECONDS,
                     )
 
-    def test_pane_fill_rejects_malformed_records(self):
+    def test_pane_fill_quarantines_malformed_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pane = Path(directory) / "pane"
+            pane.mkdir()
+            broken = pane / "broken.context"
+            good = pane / "good.context"
+            broken.write_text('{"version":1,"fill":"high"}\n', encoding="utf-8")
+            claude_token.write_fill(good, 0.6)
+            stderr = io.StringIO()
+
+            with mock.patch.object(sys, "stderr", stderr):
+                self.assertEqual(claude_token.pane_fill(good), 0.6)
+
+            self.assertFalse(broken.exists())
+            self.assertTrue(good.exists())
+            self.assertIn("removing invalid context record", stderr.getvalue())
+            self.assertIn(str(broken), stderr.getvalue())
+
+    def test_pane_fill_quarantines_invalid_json_beside_live_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pane = Path(directory) / "pane"
+            pane.mkdir()
+            broken = pane / "invalid-json.context"
+            good = pane / "good.context"
+            broken.write_text("{not-json\n", encoding="utf-8")
+            claude_token.write_fill(good, 0.35)
+            stderr = io.StringIO()
+
+            with mock.patch.object(sys, "stderr", stderr):
+                self.assertEqual(claude_token.pane_fill(good), 0.35)
+
+            self.assertFalse(broken.exists())
+            self.assertTrue(good.exists())
+            self.assertIn("invalid JSON", stderr.getvalue())
+
+    def test_pane_fill_quarantines_unsupported_version_beside_live_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pane = Path(directory) / "pane"
+            pane.mkdir()
+            broken = pane / "future-version.context"
+            good = pane / "good.context"
+            broken.write_text(
+                json.dumps(
+                    {
+                        "version": claude_token.CONTEXT_RECORD_VERSION + 1,
+                        "fill": 0.9,
+                        "updated_at": 1000.0,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            claude_token.write_fill(good, 0.55, updated_at=1000.0)
+            stderr = io.StringIO()
+
+            with mock.patch.object(sys, "stderr", stderr):
+                self.assertEqual(
+                    claude_token.pane_fill(good, current_time=1000.0), 0.55
+                )
+
+            self.assertFalse(broken.exists())
+            self.assertTrue(good.exists())
+            self.assertIn("unsupported context record version", stderr.getvalue())
+
+    def test_pane_fill_quarantines_non_finite_values_beside_live_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pane = Path(directory) / "pane"
+            pane.mkdir()
+            broken = pane / "non-finite.context"
+            good = pane / "good.context"
+            broken.write_text(
+                json.dumps(
+                    {
+                        "version": claude_token.CONTEXT_RECORD_VERSION,
+                        "fill": float("nan"),
+                        "updated_at": 1000.0,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            claude_token.write_fill(good, 0.8, updated_at=1000.0)
+            stderr = io.StringIO()
+
+            with mock.patch.object(sys, "stderr", stderr):
+                self.assertEqual(
+                    claude_token.pane_fill(good, current_time=1000.0), 0.8
+                )
+
+            self.assertFalse(broken.exists())
+            self.assertTrue(good.exists())
+            self.assertIn("non-finite context record", stderr.getvalue())
+
+    def test_pane_fill_reports_corrupt_record_cleanup_errors(self):
         with tempfile.TemporaryDirectory() as directory:
             record = Path(directory) / "pane" / "broken.context"
             record.parent.mkdir()
             record.write_text('{"version":1,"fill":"high"}\n', encoding="utf-8")
 
-            with self.assertRaisesRegex(
-                RuntimeError, "unable to aggregate context records"
-            ):
-                claude_token.pane_fill(record)
+            with mock.patch.object(
+                Path, "unlink", side_effect=PermissionError("permission denied")
+            ), mock.patch.object(sys, "stderr", io.StringIO()):
+                with self.assertRaisesRegex(
+                    RuntimeError, "unable to aggregate context records"
+                ):
+                    claude_token.pane_fill(record)
 
     def test_session_start_refreshes_current_record_and_cleans_stale_records(self):
         with tempfile.TemporaryDirectory() as directory:

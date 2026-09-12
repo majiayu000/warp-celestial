@@ -5,6 +5,12 @@ All notable changes to Warp Celestial are documented here. Versions follow
 
 ## [Unreleased]
 
+### Fixed
+
+- Quarantined corrupt or unsupported per-session `*.context` records during
+  pane aggregation (log to stderr and delete), so one bad file cannot abort
+  Claude Code `statusLine` / cursor sync for the whole Warp pane.
+
 ## [0.1.1] - 2026-08-20
 
 ### Fixed
