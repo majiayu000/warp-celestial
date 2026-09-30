@@ -127,6 +127,120 @@ class InstallScriptTests(unittest.TestCase):
             self.assertFalse(target.exists())
             self.assertTrue(marker.exists())
 
+    def test_uninstall_rejects_symlink_roots_before_mutation(self):
+        for root_name in ("support", "cache"):
+            for suffix in ("", "/", "//", "/."):
+                with self.subTest(root=root_name, suffix=suffix):
+                    with tempfile.TemporaryDirectory() as directory:
+                        home = Path(directory) / "home"
+                        support = home / ".local/share/warp-celestial"
+                        cache = home / ".cache/warp/blackhole_contexts"
+                        app_dir = home / "apps"
+                        app_path = app_dir / "Warp Celestial.app"
+                        launcher = home / ".local/bin/warp-celestial"
+                        settings = home / ".claude/settings.json"
+                        for root in (support, cache):
+                            write_marker(root)
+                            (root / "sentinel").write_text("keep\n", encoding="utf-8")
+                        app_path.mkdir(parents=True)
+                        launcher.parent.mkdir(parents=True)
+                        launcher.write_text("keep\n", encoding="utf-8")
+                        settings.parent.mkdir(parents=True)
+                        settings.write_text('{"theme": "dark"}\n', encoding="utf-8")
+                        link = home / "managed-alias"
+                        link.symlink_to(
+                            support if root_name == "support" else cache,
+                            target_is_directory=True,
+                        )
+                        environment = os.environ.copy()
+                        environment.update(
+                            {
+                                "HOME": str(home),
+                                "WARP_CELESTIAL_HOME": str(support),
+                                "WARP_CELESTIAL_CACHE_DIR": str(cache),
+                                "WARP_CELESTIAL_APP_DIR": str(app_dir),
+                                "CLAUDE_SETTINGS_FILE": str(settings),
+                            }
+                        )
+                        key = (
+                            "WARP_CELESTIAL_HOME" if root_name == "support"
+                            else "WARP_CELESTIAL_CACHE_DIR"
+                        )
+                        environment[key] = str(link) + suffix
+                        result = subprocess.run(
+                            [str(INSTALLER), "--uninstall", "--yes"],
+                            cwd=REPOSITORY,
+                            env=environment,
+                            text=True,
+                            capture_output=True,
+                            check=False,
+                        )
+
+                        self.assertEqual(result.returncode, 1, result.stdout)
+                        self.assertIn("must not be a symbolic link", result.stderr)
+                        self.assertNotIn("was uninstalled", result.stdout)
+                        self.assertTrue(link.is_symlink())
+                        for root in (support, cache):
+                            self.assertEqual(
+                                (root / "sentinel").read_text(encoding="utf-8"), "keep\n"
+                            )
+                            self.assertTrue((root / ".warp-celestial-managed").is_file())
+                        self.assertTrue(app_path.is_dir())
+                        self.assertEqual(launcher.read_text(encoding="utf-8"), "keep\n")
+                        self.assertEqual(
+                            settings.read_text(encoding="utf-8"), '{"theme": "dark"}\n'
+                        )
+
+    def test_install_preparation_rejects_symlink_roots(self):
+        for prepare, variable, basename in (
+            ("prepare_install_root", "INSTALL_ROOT", "warp-celestial"),
+            ("prepare_context_root", "CONTEXT_DIR", "blackhole_contexts"),
+        ):
+            for marked in (False, True):
+                with self.subTest(prepare=prepare, marked=marked):
+                    with tempfile.TemporaryDirectory() as directory:
+                        home = Path(directory) / "home"
+                        root = home / "canonical" / basename
+                        root.mkdir(parents=True)
+                        if marked:
+                            write_marker(root)
+                        link = home / "managed-alias"
+                        link.symlink_to(root, target_is_directory=True)
+                        before = sorted(path.name for path in root.iterdir())
+                        environment = os.environ.copy()
+                        environment.update(
+                            {
+                                "HOME": str(home),
+                                variable: str(link),
+                                "INSTALL_MARKER": str(link / ".warp-celestial-managed"),
+                                "CACHE_MARKER": str(link / ".warp-celestial-managed"),
+                                "SOURCE_DIR": str(link / "warp"),
+                                "MANAGED_MARKER_VERSION": MARKER_VERSION,
+                            }
+                        )
+                        result = subprocess.run(
+                            [
+                                "bash", "-c",
+                                'set -Eeuo pipefail; '
+                                'fail() { printf "%s\\n" "$*" >&2; exit 1; }; '
+                                'check_command() { command -v "$1" >/dev/null; }; '
+                                'source "$1"; "$2"',
+                                "test-install-preparation",
+                                str(REPOSITORY / "scripts/install_safety.sh"),
+                                prepare,
+                            ],
+                            cwd=REPOSITORY,
+                            env=environment,
+                            text=True,
+                            capture_output=True,
+                            check=False,
+                        )
+
+                        self.assertEqual(result.returncode, 1, result.stdout)
+                        self.assertIn("must not be a symbolic link", result.stderr)
+                        self.assertTrue(link.is_symlink())
+                        self.assertEqual(sorted(path.name for path in root.iterdir()), before)
+
     def test_uninstall_rejects_broad_or_unowned_roots(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory) / "home"

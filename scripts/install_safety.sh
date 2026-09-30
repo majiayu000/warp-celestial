@@ -21,6 +21,12 @@ assert_dedicated_root_path() {
   [[ "$target" == /* ]] || fail "Managed directory must be absolute: ${target}"
   canonical_target="$(canonical_path "$target")"
   canonical_home="$(canonical_path "$HOME")"
+  python3 - "$target" <<'PY' || fail "Managed directory must not be a symbolic link: ${target}"
+import os
+import sys
+
+sys.exit(1 if os.path.islink(os.path.abspath(sys.argv[1])) else 0)
+PY
   [[ "$(basename "$canonical_target")" == "$expected_name" ]] ||
     fail "Managed directory must end in ${expected_name}: ${target}"
   case "$canonical_target" in

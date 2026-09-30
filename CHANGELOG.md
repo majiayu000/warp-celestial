@@ -5,6 +5,11 @@ All notable changes to Warp Celestial are documented here. Versions follow
 
 ## [Unreleased]
 
+### Fixed
+
+- Reject symbolic links as managed support/cache roots during installation and
+  uninstall, preventing a successful uninstall that leaves the owned tree behind.
+
 ## [0.1.1] - 2026-08-20
 
 ### Fixed
