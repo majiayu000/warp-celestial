@@ -196,6 +196,11 @@ live sessions in the same pane, and encodes that value into a checksummed OSC
 12 cursor color. Ordinary theme cursor colors cannot accidentally match the
 signature.
 
+Boolean `used_percentage` values are ignored so the token ratio can be used.
+Non-finite percentages (`NaN` or infinities) raise `ValueError` before any
+record write or cursor update. Direct fill writes also reject non-finite values
+and booleans, preserving any existing session record.
+
 The installer registers the same script for Claude Code's `SessionStart` and
 `SessionEnd` hooks. A start creates a zero record; an end removes only that
 session and republishes the remaining pane maximum. With no sessions left, the
