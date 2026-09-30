@@ -215,6 +215,7 @@ check_prerequisites() {
   check_command ditto "ditto is included with macOS."
   resolve_xcode
   check_disk_space
+  assert_dedicated_root_path "$CONTEXT_DIR" "blackhole_contexts"
   if [[ "$CHECK_ONLY" != true ]]; then
     prepare_install_root
   else
@@ -525,8 +526,8 @@ uninstall_all() {
   assert_valid_managed_marker "$INSTALL_MARKER" "$INSTALL_ROOT"
   assert_exact_child "$APP_PATH" "$APP_DIR" "Warp Celestial.app"
   assert_exact_child "$LAUNCHER_PATH" "$BIN_DIR" "warp-celestial"
+  assert_dedicated_root_path "$CONTEXT_DIR" "blackhole_contexts"
   if [[ -e "$CONTEXT_DIR" ]]; then
-    assert_dedicated_root_path "$CONTEXT_DIR" "blackhole_contexts"
     assert_valid_managed_marker "$CACHE_MARKER" "$CONTEXT_DIR"
   fi
 

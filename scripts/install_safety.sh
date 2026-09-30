@@ -9,7 +9,7 @@ canonical_path() {
 import os
 import sys
 
-print(os.path.realpath(os.path.abspath(os.path.expanduser(sys.argv[1]))))
+print(os.path.realpath(os.path.expanduser(sys.argv[1])))
 PY
 }
 
@@ -25,7 +25,11 @@ assert_dedicated_root_path() {
 import os
 import sys
 
-sys.exit(1 if os.path.islink(os.path.abspath(sys.argv[1])) else 0)
+# Strip only terminal directory syntax; leave parent links and .. to the filesystem.
+target = sys.argv[1].rstrip("/")
+while target.endswith("/."):
+    target = target[:-2].rstrip("/")
+sys.exit(1 if os.path.islink(target) else 0)
 PY
   [[ "$(basename "$canonical_target")" == "$expected_name" ]] ||
     fail "Managed directory must end in ${expected_name}: ${target}"
