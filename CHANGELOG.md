@@ -7,6 +7,10 @@ All notable changes to Warp Celestial are documented here. Versions follow
 
 ### Fixed
 
+- Reject symbolic links, including dangling links, as managed support/cache roots
+  before installation or uninstall changes files. Resolve parent symlinks before
+  `..` without allowing final-root links, preventing partial installation or a
+  successful uninstall that leaves the owned tree behind.
 - Rejected non-finite context percentages and fill writes before clamping or
   publishing; boolean percentages now fall back to the token ratio, and boolean
   fill writes are rejected without replacing existing records.

@@ -364,7 +364,11 @@ left untouched. Timestamped Claude settings backups are preserved.
 Recursive removal requires a private ownership marker bound to the canonical
 directory. Custom support/cache roots must stay below `HOME` and end in
 `warp-celestial`/`blackhole_contexts`; broad or unowned paths are rejected. If a
-pre-existing Claude configuration still references the bridge but was never
+support/cache root is a symbolic link (including a dangling link), preflight and
+uninstall reject it before changing files or starting a build. The link and its
+target stay untouched. Symlinks in parent directories are allowed, including paths
+that traverse them with `..`.
+If a pre-existing Claude configuration still references the bridge but was never
 claimed by Warp Celestial, uninstall stops and preserves the bridge instead of
 leaving a broken command.
 

@@ -9,7 +9,7 @@ canonical_path() {
 import os
 import sys
 
-print(os.path.realpath(os.path.abspath(os.path.expanduser(sys.argv[1]))))
+print(os.path.realpath(os.path.expanduser(sys.argv[1])))
 PY
 }
 
@@ -21,6 +21,16 @@ assert_dedicated_root_path() {
   [[ "$target" == /* ]] || fail "Managed directory must be absolute: ${target}"
   canonical_target="$(canonical_path "$target")"
   canonical_home="$(canonical_path "$HOME")"
+  python3 - "$target" <<'PY' || fail "Managed directory must not be a symbolic link: ${target}"
+import os
+import sys
+
+# Strip only terminal directory syntax; leave parent links and .. to the filesystem.
+target = sys.argv[1].rstrip("/")
+while target.endswith("/."):
+    target = target[:-2].rstrip("/")
+sys.exit(1 if os.path.islink(target) else 0)
+PY
   [[ "$(basename "$canonical_target")" == "$expected_name" ]] ||
     fail "Managed directory must end in ${expected_name}: ${target}"
   case "$canonical_target" in
