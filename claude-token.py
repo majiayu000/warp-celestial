@@ -87,7 +87,9 @@ def context_fill(data: dict) -> float:
     ctx = data.get("context_window") or {}
 
     used_percentage = ctx.get("used_percentage")
-    if isinstance(used_percentage, (int, float)):
+    if isinstance(used_percentage, (int, float)) and not isinstance(used_percentage, bool):
+        if not math.isfinite(used_percentage):
+            raise ValueError("context percentage must be finite")
         return max(0.0, min(1.0, used_percentage / 100.0))
 
     total = ctx.get("total_input_tokens")
@@ -135,6 +137,8 @@ def write_fill(
     record: Path, level: float, updated_at: Optional[float] = None
 ) -> None:
     """Atomically write the fill level to one Claude session record."""
+    if isinstance(level, bool) or not math.isfinite(level):
+        raise ValueError("context fill must be finite and not a boolean")
     level = max(0.0, min(1.0, level))
     timestamp = time.time() if updated_at is None else updated_at
     if not math.isfinite(timestamp) or timestamp < 0.0:
