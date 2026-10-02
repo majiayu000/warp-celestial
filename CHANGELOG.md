@@ -5,6 +5,12 @@ All notable changes to Warp Celestial are documented here. Versions follow
 
 ## [Unreleased]
 
+### Fixed
+
+- Rejected non-finite context percentages and fill writes before clamping or
+  publishing; boolean percentages now fall back to the token ratio, and boolean
+  fill writes are rejected without replacing existing records.
+
 ## [0.1.1] - 2026-08-20
 
 ### Fixed

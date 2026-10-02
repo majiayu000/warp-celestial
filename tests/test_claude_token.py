@@ -55,6 +55,36 @@ class ContextDirectoryTests(unittest.TestCase):
 
 
 class ContextFillTests(unittest.TestCase):
+    def test_rejects_non_finite_used_percentage(self):
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "percentage.*finite"):
+                    claude_token.context_fill(
+                        {
+                            "context_window": {
+                                "used_percentage": value,
+                                "total_input_tokens": 42,
+                                "context_window_size": 100,
+                            }
+                        }
+                    )
+
+    def test_boolean_used_percentage_falls_back_to_token_ratio(self):
+        for value in (True, False):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    claude_token.context_fill(
+                        {
+                            "context_window": {
+                                "used_percentage": value,
+                                "total_input_tokens": 42,
+                                "context_window_size": 100,
+                            }
+                        }
+                    ),
+                    0.42,
+                )
+
     def test_prefers_used_percentage_and_clamps_it(self):
         self.assertEqual(
             claude_token.context_fill(
@@ -90,6 +120,53 @@ class ContextFillTests(unittest.TestCase):
 
 
 class ContextFileTests(unittest.TestCase):
+    def test_write_fill_rejects_invalid_levels_without_changing_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            context_dir = Path(directory)
+            record = context_dir / "pane" / "session.context"
+            missing_record = context_dir / "missing" / "session.context"
+            with mock.patch.object(claude_token, "CONTEXT_DIR", context_dir):
+                claude_token.write_fill(record, 0.42, updated_at=100.0)
+                original = record.read_bytes()
+                for value in (float("nan"), float("inf"), float("-inf"), True, False):
+                    with self.subTest(value=value):
+                        for target in (record, missing_record):
+                            with self.assertRaisesRegex(ValueError, "fill"):
+                                claude_token.write_fill(target, value, updated_at=100.0)
+                        self.assertEqual(record.read_bytes(), original)
+                        self.assertEqual(claude_token.pane_fill(record, current_time=100.0), 0.42)
+                        self.assertFalse(missing_record.parent.exists())
+
+    def test_non_finite_status_payload_does_not_write_or_publish(self):
+        with tempfile.TemporaryDirectory() as directory:
+            context_dir = Path(directory)
+            pane_id = "550e8400e29b41d4a716446655440000"
+            with mock.patch.object(
+                claude_token, "CONTEXT_DIR", context_dir
+            ), mock.patch.dict(
+                os.environ, {"WARP_TERMINAL_SESSION_UUID": pane_id}, clear=True
+            ):
+                data = {"session_id": "session"}
+                record = claude_token.context_record(data)
+                assert record is not None
+                claude_token.write_fill(record, 0.42, updated_at=100.0)
+                original = record.read_bytes()
+                for value in (float("nan"), float("inf"), float("-inf")):
+                    with self.subTest(value=value):
+                        data["context_window"] = {"used_percentage": value}
+                        with mock.patch.object(
+                            sys, "stdin", io.StringIO(json.dumps(data))
+                        ), mock.patch.object(
+                            sys, "stdout", io.StringIO()
+                        ) as stdout, mock.patch.object(
+                            claude_token, "emit_cursor"
+                        ) as emit_cursor:
+                            with self.assertRaisesRegex(ValueError, "percentage.*finite"):
+                                claude_token.main()
+                        self.assertEqual(record.read_bytes(), original)
+                        self.assertEqual(stdout.getvalue(), "")
+                        emit_cursor.assert_not_called()
+
     def test_context_record_is_scoped_to_pane_and_hashed_session(self):
         with tempfile.TemporaryDirectory() as directory:
             original_dir = claude_token.CONTEXT_DIR
